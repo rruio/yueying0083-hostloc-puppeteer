@@ -81,7 +81,7 @@ function log(message) {
       const randomUid = Math.floor(Math.random() * (31210 - 31180 + 1)) + 31180;
       log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`);
       await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 10 * 1000));
     }
 
     await browser.close();
