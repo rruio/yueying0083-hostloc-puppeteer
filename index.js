@@ -1,4 +1,8 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+// Add stealth plugin
+puppeteer.use(StealthPlugin());
 const { format } = require('date-fns');
 
 // 加载环境变量
