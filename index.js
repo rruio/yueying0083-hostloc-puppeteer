@@ -2,8 +2,7 @@ const puppeteer = require('puppeteer');
 const { format } = require('date-fns');
 
 // 加载环境变量
-const isLocal =
-  !process.env.GITHUB_ACTIONS && process.env.NODE_ENV !== 'production';
+const isLocal = process.env.NODE_ENV === 'test';
 if (isLocal) {
   require('dotenv').config();
 }
