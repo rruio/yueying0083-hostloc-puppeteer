@@ -24,7 +24,7 @@ function log(message) {
     }
 
     // 本地测试时显示浏览器
-    const isLocal = process.env.NODE_ENV !== 'production';
+    const isLocal = process.env.NODE_ENV === 'test';
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
 
     if (!username || !password) {
