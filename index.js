@@ -75,10 +75,9 @@ function log(message) {
 
     console.log('登录成功');
 
-    // 随机访问10个用户空间(31180-31210范围内)
-    log('开始随机访问10个用户空间...');
-    for (let i = 0; i < 10; i++) {
-      const randomUid = Math.floor(Math.random() * (31210 - 31180 + 1)) + 31180;
+    log('开始随机访问20个用户空间...');
+    for (let i = 0; i < 20; i++) {
+      const randomUid = Math.floor(Math.random() * 31210);
       log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`);
       try {
         await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
