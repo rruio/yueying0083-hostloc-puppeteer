@@ -12,7 +12,11 @@
 1. 安装依赖：`npm install`
 2. 本地运行：`npm start`
 3. 测试运行：`npm test`
+在render.com 中的是
+Start Command
 
+Render runs this command to start your app with each deploy.
+`npx puppeteer browsers install chrome && npm start`
 ## 环境变量
 - `USERNAME`: 论坛用户名
 - `PASSWORD`: 论坛密码
