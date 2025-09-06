@@ -77,6 +77,39 @@ async function signInForAccount(account, accountId) {
       await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
     }
 
+    // 提取用户信息
+    log('提取用户信息...', accountId);
+    try {
+      await page.goto('https://hostloc.com/home.php?mod=spacecp&ac=usergroup');
+      await page.waitForSelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(1) > th > h4');
+
+      const userInfo = await page.evaluate(() => {
+        const currentGroupElement = document.querySelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(1) > th > h4');
+        const currentGroup = currentGroupElement ? currentGroupElement.textContent.trim() : 'N/A';
+
+        const currentPointsElement = document.querySelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(2) > th > span');
+        const currentPointsText = currentPointsElement ? currentPointsElement.textContent.trim() : 'N/A';
+        const currentPoints = currentPointsText.match(/积分: (\d+)/) ? parseInt(currentPointsText.match(/积分: (\d+)/)[1]) : 'N/A';
+
+        const nextGroupElement = document.querySelector('#c2#tba li');
+        const nextGroupText = nextGroupElement ? nextGroupElement.textContent.trim() : 'N/A';
+        const nextGroup = nextGroupText.match(/晋级用户组 - (.+)/) ? nextGroupText.match(/晋级用户组 - (.+)/)[1] : 'N/A';
+
+        const upgradePointsElement = document.querySelector('#ct > div.mn > div > div.tdats > div > table > tbody:nth-child(1) > tr:nth-child(1) > th > span');
+        const upgradePointsText = upgradePointsElement ? upgradePointsElement.textContent.trim() : 'N/A';
+        const upgradePoints = upgradePointsText.match(/您升级到此用户组还需积分 (\d+)/) ? parseInt(upgradePointsText.match(/您升级到此用户组还需积分 (\d+)/)[1]) : 'N/A';
+
+        return { currentGroup, currentPoints, nextGroup, upgradePoints };
+      });
+
+      log(`当前用户组: ${userInfo.currentGroup}`, accountId);
+      log(`当前积分: ${userInfo.currentPoints}`, accountId);
+      log(`晋级用户组: ${userInfo.nextGroup}`, accountId);
+      log(`升级所需积分: ${userInfo.upgradePoints}`, accountId);
+    } catch (error) {
+      log(`提取用户信息失败: ${error.message}`, accountId);
+    }
+
     await browser.close();
     log('任务完成', accountId);
     return true;
