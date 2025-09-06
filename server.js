@@ -306,6 +306,18 @@ app.get('/', (req, res) => {
             <div style="text-align: right; margin-bottom: 20px;">
                 <button onclick="logout()" style="background-color: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">登出</button>
             </div>
+
+            <h2 style="margin-top: 30px;">账号信息</h2>
+            <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+                <div style="margin-bottom: 15px;">
+                    <strong id="accountCount">当前配置账号数量：加载中...</strong>
+                    <button onclick="loadAccountInfo()" style="margin-left: 15px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">刷新账号信息</button>
+                </div>
+                <div id="accountList" style="margin-top: 10px;">
+                    <div style="color: #666;">正在加载账号信息...</div>
+                </div>
+            </div>
+
             <div id="status" class="status idle">状态: 空闲</div>
             <button id="runBtn" class="run-btn" onclick="runTask()">运行任务</button>
             <button onclick="checkStatus()">刷新状态</button>
@@ -491,10 +503,42 @@ app.get('/', (req, res) => {
               logsDiv.scrollTop = logsDiv.scrollHeight; // 自动滚动到底部
             });
 
+            // 账号信息相关函数
+            async function loadAccountInfo() {
+                try {
+                    const response = await fetch('/accounts');
+                    const data = await response.json();
+
+                    if (data.success) {
+                        document.getElementById('accountCount').textContent = '当前配置账号数量：' + data.count + '个';
+
+                        const accountListDiv = document.getElementById('accountList');
+                        if (data.accounts.length > 0) {
+                            let html = '<ul style="margin: 0; padding-left: 20px;">';
+                            data.accounts.forEach(account => {
+                                html += '<li>账号 ' + account.id + ': ' + account.username + '</li>';
+                            });
+                            html += '</ul>';
+                            accountListDiv.innerHTML = html;
+                        } else {
+                            accountListDiv.innerHTML = '<div style="color: #dc3545;">未配置任何账号</div>';
+                        }
+                    } else {
+                        document.getElementById('accountCount').textContent = '获取账号信息失败';
+                        document.getElementById('accountList').innerHTML = '<div style="color: #dc3545;">无法加载账号信息</div>';
+                    }
+                } catch (error) {
+                    console.error('加载账号信息失败:', error);
+                    document.getElementById('accountCount').textContent = '获取账号信息失败';
+                    document.getElementById('accountList').innerHTML = '<div style="color: #dc3545;">网络错误，无法加载账号信息</div>';
+                }
+            }
+
             // 定期检查状态
             setInterval(checkStatus, 5000);
             checkStatus(); // 初始检查
             loadScheduleConfig(); // 加载定时配置
+            loadAccountInfo(); // 加载账号信息
         </script>
     </body>
     </html>
@@ -676,6 +720,50 @@ app.post('/schedule', requireAuth, (req, res) => {
   } catch (error) {
     log(`更新定时配置失败: ${error.message}`);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /accounts - 获取账号信息
+app.get('/accounts', requireAuth, (req, res) => {
+  try {
+    // 从环境变量获取多个账号配置
+    const accountsEnv = process.env.HOSTLOC_ACCOUNTS;
+    let accounts = [];
+
+    if (accountsEnv) {
+      try {
+        accounts = JSON.parse(accountsEnv);
+        log(`从环境变量加载了${accounts.length}个账号配置`);
+      } catch (error) {
+        log(`解析HOSTLOC_ACCOUNTS环境变量失败: ${error.message}`);
+      }
+    }
+
+    // 如果没有配置多个账号，尝试使用单个账号配置（向后兼容）
+    if (accounts.length === 0) {
+      const username = process.env.HOSTLOC_USERNAME;
+      const password = process.env.HOSTLOC_PASSWORD;
+
+      if (username && password) {
+        accounts.push({ username, password });
+        log('使用单个账号配置（向后兼容）');
+      }
+    }
+
+    // 只返回用户名，不包含密码
+    const accountInfo = accounts.map((account, index) => ({
+      id: index + 1,
+      username: account.username
+    }));
+
+    res.json({
+      success: true,
+      count: accounts.length,
+      accounts: accountInfo
+    });
+  } catch (error) {
+    log(`获取账号信息失败: ${error.message}`);
+    res.status(500).json({ success: false, message: '获取账号信息失败' });
   }
 });
 
