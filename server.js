@@ -5,6 +5,7 @@ const { format } = require('date-fns');
 const schedule = require('node-schedule');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { Server } = require('socket.io');
 
 // Add stealth plugin
 puppeteer.use(StealthPlugin());
@@ -41,7 +42,11 @@ app.use(session({
 // 日志函数
 function log(message) {
   const timestamp = format(new Date(), 'yyyy-MM-dd HH:mm:ss');
-  console.log(`[${timestamp}] ${message}`);
+  const logMessage = `[${timestamp}] ${message}`;
+  console.log(logMessage);
+  if (global.io) {
+    global.io.emit('log', logMessage);
+  }
 }
 
 // 全局状态
@@ -112,6 +117,7 @@ async function runPuppeteerTask() {
     }
 
     log('登录成功!');
+    await page.evaluate(() => console.log('登录成功'));
 
     log('开始随机访问20个用户空间...');
     for (let i = 0; i < 20; i++) {
@@ -309,6 +315,7 @@ app.get('/', (req, res) => {
             <div id="logs" style="margin-top: 20px; padding: 10px; background-color: #f8f9fa; border: 1px solid #dee2e6; height: 300px; overflow-y: auto;"></div>
         </div>
 
+        <script src="/socket.io/socket.io.js"></script>
         <script>
             function updateStatus(data) {
                 const statusEl = document.getElementById('status');
@@ -429,6 +436,14 @@ app.get('/', (req, res) => {
                 }
             }
 
+            // Socket.io 客户端
+            const socket = io();
+            socket.on('log', (msg) => {
+              const logsDiv = document.getElementById('logs');
+              logsDiv.innerHTML += msg + '<br>';
+              logsDiv.scrollTop = logsDiv.scrollHeight; // 自动滚动到底部
+            });
+
             // 定期检查状态
             setInterval(checkStatus, 5000);
             checkStatus(); // 初始检查
@@ -545,8 +560,11 @@ app.post('/schedule', requireAuth, (req, res) => {
 });
 
 // 启动服务器
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log(`服务器运行在端口 ${PORT}`);
 });
+
+const io = new Server(server);
+global.io = io;
 
 module.exports = app;
