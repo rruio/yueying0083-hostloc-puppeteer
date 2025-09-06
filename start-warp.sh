@@ -19,9 +19,21 @@ if [ ! -f "wireproxy.conf" ]; then
     exit 1
 fi
 
+# 检查WARP_PRIVATE_KEY环境变量
+if [ -z "$WARP_PRIVATE_KEY" ]; then
+    echo "错误: WARP_PRIVATE_KEY环境变量未设置"
+    exit 1
+fi
+
+# 设置WARP_PRIVATE_KEY环境变量（如果未设置，使用默认值）
+export WARP_PRIVATE_KEY=${WARP_PRIVATE_KEY}
+
+# 使用envsubst替换配置文件中的环境变量
+envsubst < wireproxy.conf > wireproxy.conf.tmp
+
 # 启动WireProxy
 echo "启动WireProxy..."
-wireproxy -c wireproxy.conf &
+wireproxy -c wireproxy.conf.tmp &
 
 # 等待WireProxy启动
 sleep 3
