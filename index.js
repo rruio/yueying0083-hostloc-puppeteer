@@ -17,6 +17,44 @@ function log(message, accountId = null) {
   console.log(`[${timestamp}]${prefix} ${message}`);
 }
 
+// 重试函数 - 实现指数退避重试策略
+async function retryWithBackoff(operation, maxRetries = 3, accountId = null) {
+  let lastError;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await operation();
+
+      // 检查页面是否加载成功（避免默认浏览器错误页面）
+      if (result && result.page && result.page.url().startsWith('chrome-error://')) {
+        throw new Error('页面加载失败，返回默认浏览器错误页面');
+      }
+
+      return result;
+    } catch (error) {
+      lastError = error;
+
+      // 检查是否是需要重试的错误类型
+      const isRetryableError = (
+        error.name === 'TimeoutError' ||
+        error.message.includes('Navigation timeout') ||
+        error.message.includes('net::ERR') ||
+        error.message.includes('页面加载失败')
+      );
+
+      if (!isRetryableError || attempt === maxRetries) {
+        throw error;
+      }
+
+      // 指数退避延迟
+      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      log(`操作失败，将在${delay}ms后重试 (${attempt + 1}/${maxRetries}): ${error.message}`, accountId);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError;
+}
 // 单个账号签到函数
 async function signInForAccount(account, accountId) {
   let browser;
@@ -38,18 +76,31 @@ async function signInForAccount(account, accountId) {
     });
     const page = await browser.newPage();
 
+    // 设置导航超时为60秒
+    await page.setDefaultNavigationTimeout(60000);
+
     // 访问hostloc并登录
     log('访问hostloc论坛...', accountId);
-    await page.goto('https://hostloc.com/forum-45-1.html');
+    await retryWithBackoff(async () => {
+      return await page.goto('https://hostloc.com/forum-45-1.html', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+    }, 3, accountId);
 
     log('输入用户名和密码...', accountId);
     await page.type('#ls_username', account.username);
     await page.type('#ls_password', account.password);
     log('提交登录表单...', accountId);
-    await page.click('button[type="submit"]');
 
-    // 等待登录完成并验证
-    await page.waitForNavigation();
+    // 提交表单并等待导航完成，使用重试逻辑
+    await retryWithBackoff(async () => {
+      await page.click('button[type="submit"]');
+      return await page.waitForNavigation({
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+    }, 3, accountId);
 
     // 检查用户空间链接是否存在以确认登录成功
     log('等待登录成功...', accountId);
@@ -70,7 +121,12 @@ async function signInForAccount(account, accountId) {
       const randomUid = Math.floor(Math.random() * 31210);
       log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`, accountId);
       try {
-        await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
+        await retryWithBackoff(async () => {
+          return await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          });
+        }, 3, accountId);
       } catch (error) {
         log(`访问用户空间失败: ${error.message}`, accountId);
       }
@@ -80,8 +136,18 @@ async function signInForAccount(account, accountId) {
     // 提取用户信息
     log('提取用户信息...', accountId);
     try {
-      await page.goto('https://hostloc.com/home.php?mod=spacecp&ac=usergroup');
-      await page.waitForSelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(1) > th > h4');
+      await retryWithBackoff(async () => {
+        return await page.goto('https://hostloc.com/home.php?mod=spacecp&ac=usergroup', {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        });
+      }, 3, accountId);
+
+      await retryWithBackoff(async () => {
+        return await page.waitForSelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(1) > th > h4', {
+          timeout: 60000
+        });
+      }, 3, accountId);
 
       const userInfo = await page.evaluate(() => {
         const currentGroupElement = document.querySelector('#ct > div.mn > div > div.tdats > table.tdat.tfx > tbody:nth-child(1) > tr:nth-child(1) > th > h4');
