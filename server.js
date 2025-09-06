@@ -440,7 +440,9 @@ app.get('/', (req, res) => {
             const socket = io();
             socket.on('log', (msg) => {
               const logsDiv = document.getElementById('logs');
-              logsDiv.innerHTML += msg + '<br>';
+              const line = document.createElement('div');
+              line.textContent = msg;
+              logsDiv.appendChild(line);
               logsDiv.scrollTop = logsDiv.scrollHeight; // 自动滚动到底部
             });
 
