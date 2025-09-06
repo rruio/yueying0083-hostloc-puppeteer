@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "NODE_ENV=test node server.js",
-    "puppeteer": "node index.js"
+    "puppeteer": "node index.js",
+    "render": "./start-render.sh",
+    "build-render": "./build-render.sh"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -80,13 +80,29 @@ async function runPuppeteerTask() {
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
 
     log('启动浏览器...');
+
+    // 检查WARP代理配置
+    const warpEnabled = process.env.WARP_ENABLED === 'true';
+    const warpSocks5Host = process.env.WARP_SOCKS5_HOST;
+    const warpSocks5Port = process.env.WARP_SOCKS5_PORT;
+
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ];
+
+    // 如果启用WARP代理，添加代理参数
+    if (warpEnabled && warpSocks5Host && warpSocks5Port) {
+      launchArgs.push(`--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`);
+      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`);
+    } else if (warpEnabled) {
+      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT');
+    }
+
     const browser = await puppeteer.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-      ],
+      args: launchArgs,
       ...(isLocal ? { slowMo: 50 } : {}),
     });
     const page = await browser.newPage();
@@ -293,7 +309,9 @@ app.get('/', (req, res) => {
             <div id="status" class="status idle">状态: 空闲</div>
             <button id="runBtn" class="run-btn" onclick="runTask()">运行任务</button>
             <button onclick="checkStatus()">刷新状态</button>
+            <button onclick="testWarpIp()" style="background-color: #17a2b8; color: white; border: none; padding: 10px 20px; margin: 5px; cursor: pointer;">测试WARP出口IP</button>
             <div id="lastRun">最后运行时间: 从未运行</div>
+            <div id="warpTestResult" style="margin: 10px 0; padding: 10px; background-color: #f8f9fa; border-radius: 5px; display: none;"></div>
 
             <h2 style="margin-top: 30px;">定时设置</h2>
             <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
@@ -358,6 +376,33 @@ app.get('/', (req, res) => {
                     updateStatus(data);
                 } catch (error) {
                     console.error('获取状态失败:', error);
+                }
+            }
+
+            async function testWarpIp() {
+                const resultDiv = document.getElementById('warpTestResult');
+                resultDiv.style.display = 'block';
+                resultDiv.textContent = '正在测试WARP出口IP...';
+                resultDiv.style.backgroundColor = '#fff3cd';
+                resultDiv.style.color = '#856404';
+
+                try {
+                    const response = await fetch('/test-warp-ip');
+                    const result = await response.json();
+
+                    if (result.success) {
+                        resultDiv.textContent = '[成功] WARP出口IP测试成功!\\n出口IP: ' + result.ip + '\\n代理: ' + result.proxy;
+                        resultDiv.style.backgroundColor = '#d4edda';
+                        resultDiv.style.color = '#155724';
+                    } else {
+                        resultDiv.textContent = '[失败] 测试失败: ' + result.message;
+                        resultDiv.style.backgroundColor = '#f8d7da';
+                        resultDiv.style.color = '#721c24';
+                    }
+                } catch (error) {
+                    resultDiv.textContent = '[错误] 请求失败: ' + error.message;
+                    resultDiv.style.backgroundColor = '#f8d7da';
+                    resultDiv.style.color = '#721c24';
                 }
             }
 
@@ -520,6 +565,79 @@ app.get('/status', requireAuth, (req, res) => {
     isRunning,
     lastRunTime: lastRunTime ? format(lastRunTime, 'yyyy-MM-dd HH:mm:ss') : null
   });
+});
+
+// GET /test-warp-ip - 测试WARP出口IP
+app.get('/test-warp-ip', requireAuth, async (req, res) => {
+  try {
+    log('开始测试WARP出口IP...');
+
+    // 检查WARP代理配置
+    const warpEnabled = process.env.WARP_ENABLED === 'true';
+    const warpSocks5Host = process.env.WARP_SOCKS5_HOST;
+    const warpSocks5Port = process.env.WARP_SOCKS5_PORT;
+
+    if (!warpEnabled || !warpSocks5Host || !warpSocks5Port) {
+      return res.status(400).json({
+        success: false,
+        message: 'WARP代理未启用或配置不完整'
+      });
+    }
+
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      `--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`
+    ];
+
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: launchArgs,
+      ...(isLocal ? { slowMo: 50 } : {}),
+    });
+
+    const page = await browser.newPage();
+
+    // 访问IP查询服务
+    log('访问IP查询服务...');
+    await page.goto('https://httpbin.org/ip', { waitUntil: 'networkidle2' });
+
+    // 获取出口IP
+    const ipInfo = await page.evaluate(() => {
+      try {
+        const bodyText = document.body.innerText;
+        const ipMatch = bodyText.match(/"origin":\s*"([^"]+)"/);
+        return ipMatch ? ipMatch[1] : null;
+      } catch (error) {
+        return null;
+      }
+    });
+
+    await browser.close();
+
+    if (ipInfo) {
+      log(`WARP出口IP测试成功: ${ipInfo}`);
+      res.json({
+        success: true,
+        message: 'WARP出口IP测试成功',
+        ip: ipInfo,
+        proxy: `socks5://${warpSocks5Host}:${warpSocks5Port}`
+      });
+    } else {
+      log('WARP出口IP测试失败：无法获取IP信息');
+      res.status(500).json({
+        success: false,
+        message: '无法获取IP信息'
+      });
+    }
+  } catch (error) {
+    log(`WARP出口IP测试出错: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      message: `测试失败: ${error.message}`
+    });
+  }
 });
 
 // GET /schedule - 获取定时配置
