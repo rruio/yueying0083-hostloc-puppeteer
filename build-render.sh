@@ -7,10 +7,6 @@ set -e
 
 echo "开始Render构建过程..."
 
-# 安装系统依赖
-echo "安装系统依赖..."
-apt-get update && apt-get install -y wget
-
 # 下载预编译的WireProxy二进制文件
 echo "下载WireProxy预编译二进制文件..."
 wget -q https://github.com/whyvl/wireproxy/releases/download/v1.0.9/wireproxy_linux_amd64.tar.gz
@@ -19,6 +15,9 @@ wget -q https://github.com/whyvl/wireproxy/releases/download/v1.0.9/wireproxy_li
 echo "解压WireProxy..."
 tar -xzf wireproxy_linux_amd64.tar.gz
 chmod +x wireproxy
+
+# 设置PATH包含当前目录
+export PATH="$PWD:$PATH"
 
 # 验证WireProxy安装
 wireproxy --version
