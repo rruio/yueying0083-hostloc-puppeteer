@@ -21,7 +21,7 @@ function log(message, accountId = null) {
 async function signInForAccount(account, accountId) {
   let browser;
   try {
-    log(`开始为账号${accountId}执行签到`, accountId);
+    log('开始执行签到任务', accountId);
 
     // 本地测试时显示浏览器
     const isLocal = process.env.NODE_ENV === 'test';
@@ -63,7 +63,7 @@ async function signInForAccount(account, accountId) {
       throw new Error('登录失败，未找到用户空间链接');
     }
 
-    log('登录成功!', accountId);
+    log('登录成功', accountId);
 
     log('开始随机访问20个用户空间...', accountId);
     for (let i = 0; i < 20; i++) {
@@ -122,22 +122,37 @@ async function signInForAccount(account, accountId) {
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
     log(`共配置${accounts.length}个账号`);
 
-    // 为每个账号安排随机延迟执行
-    const promises = accounts.map(async (account, index) => {
-      const accountId = index + 1;
-      const delay = Math.floor(Math.random() * 3600000); // 0-1小时随机延迟
-      log(`账号${accountId}将在${Math.floor(delay / 60000)}分钟后开始执行`, accountId);
+    // 生成每个账号的随机延迟
+    const delays = accounts.map(() => Math.floor(Math.random() * 3600000)); // 0-1小时随机延迟
+    const results = [];
 
-      return new Promise((resolve) => {
-        setTimeout(async () => {
-          const success = await signInForAccount(account, accountId);
-          resolve({ accountId, success });
-        }, delay);
-      });
-    });
+    // 创建账号池，包含所有账号的索引
+    let accountPool = Array.from({length: accounts.length}, (_, i) => i);
 
-    // 等待所有账号执行完成
-    const results = await Promise.all(promises);
+    // 随机抽取账号执行，直到账号池为空
+    while (accountPool.length > 0) {
+      // 随机选择一个账号索引
+      const randomIndex = Math.floor(Math.random() * accountPool.length);
+      const accountIndex = accountPool[randomIndex];
+
+      // 从账号池中移除该账号（抽签不返回）
+      accountPool.splice(randomIndex, 1);
+
+      const accountId = accountIndex + 1;
+      const delay = delays[accountIndex];
+
+      log(`随机抽取账号${accountId}，将在${Math.floor(delay / 60000)}分钟后开始执行`);
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+
+      const success = await signInForAccount(accounts[accountIndex], accountId);
+      results.push({ accountId, success });
+
+      log(`账号${accountId}执行完成`);
+    }
+
+    // 账号池为空，显示完成信息
+    log('今日所有账号已执行完成');
 
     // 统计结果
     const successCount = results.filter(r => r.success).length;
