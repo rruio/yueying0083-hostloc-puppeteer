@@ -56,7 +56,7 @@ let currentStatus = 'idle';
 
 // 定时任务配置
 let scheduleConfig = {
-  enabled: false,
+  enabled: true,
   time: '0 8 * * *', // 默认每天早上8点
   nextRun: null
 };
