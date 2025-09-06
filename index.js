@@ -18,7 +18,7 @@ function log(message) {
 
 (async () => {
   try {
-    // 从环境变量获取登录凭证try {
+    // 从环境变量获取登录凭证
     // 获取环境变量
     const username = process.env.HOSTLOC_USERNAME;
     const password = process.env.HOSTLOC_PASSWORD;
@@ -31,10 +31,6 @@ function log(message) {
     const isLocal = process.env.NODE_ENV === 'test';
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
 
-    if (!username || !password) {
-      throw new Error('请设置HOSTLOC_USERNAME和HOSTLOC_PASSWORD环境变量');
-    }
-
     log('启动浏览器...');
     const browser = await puppeteer.launch({
       headless: true,
@@ -42,50 +38,26 @@ function log(message) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--proxy-server=socks5://127.0.0.1:9091',
       ],
       ...(isLocal ? { slowMo: 50 } : {}),
     });
     const page = await browser.newPage();
 
     // 访问hostloc并登录
-    log('访问hostloc论坛...');
+    log('测试Hostloc访问...');
     await page.goto('https://hostloc.com/forum-45-1.html');
 
-    log('输入用户名和密码...');
-    await page.type('#ls_username', username);
-    await page.type('#ls_password', password);
-    log('提交登录表单...');
-    await page.click('button[type="submit"]');
+    // 检查页面标题验证访问成功
+    const title = await page.title();
+    log('Hostloc访问成功');
+    log(`页面标题: ${title}`);
 
-    // 等待登录完成并验证
-    await page.waitForNavigation();
-
-    // 检查用户空间链接是否存在以确认登录成功
-    log('等待登录成功...');
-    const loggedIn = await page.evaluate((username) => {
-      return !!document.querySelector(
-        `a[href^="space-uid-"][title="访问我的空间"]`
-      );
-    }, username);
-    log('登录成功!');
-
-    if (!loggedIn) {
-      throw new Error('登录失败，未找到用户空间链接');
-    }
-
-    console.log('登录成功');
-
-    log('开始随机访问20个用户空间...');
-    for (let i = 0; i < 20; i++) {
-      const randomUid = Math.floor(Math.random() * 31210);
-      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`);
-      try {
-        await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
-      } catch (error) {
-        log(`访问用户空间失败: ${error.message}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
-    }
+    // 检查是否有论坛内容
+    const hasContent = await page.evaluate(() => {
+      return document.querySelector('.forumdisplay') !== null;
+    });
+    log(`论坛内容检测: ${hasContent ? '成功' : '失败'}`);
 
     await browser.close();
     log('任务完成');

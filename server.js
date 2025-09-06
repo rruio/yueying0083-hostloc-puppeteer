@@ -86,6 +86,7 @@ async function runPuppeteerTask() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--proxy-server=socks5://127.0.0.1:9091',
       ],
       ...(isLocal ? { slowMo: 50 } : {}),
     });
@@ -505,7 +506,9 @@ app.post('/run', requireAuth, async (req, res) => {
 
   try {
     // 异步执行任务，不阻塞响应
-    runPuppeteerTask();
+    runPuppeteerTask().catch((error) => {
+      log(`异步任务执行失败: ${error.message}`);
+    });
     res.json({ success: true, message: '任务已启动' });
   } catch (error) {
     log(`启动任务失败: ${error.message}`);
