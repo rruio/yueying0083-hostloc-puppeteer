@@ -17,9 +17,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // 中间件
-app.use(cors());
+app.use(cors({ origin: 'http://localhost:3000' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// 在生产环境中设置 trust proxy
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
 // Session配置
 app.use(session({
@@ -27,7 +32,8 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: false, // 在生产环境中设置为true（需要HTTPS）
+    secure: process.env.NODE_ENV === 'production', // 在生产环境中设置为true（需要HTTPS）
+    sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24小时
   }
 }));
@@ -163,6 +169,14 @@ function scheduleTask() {
 function updateScheduleConfig(newConfig) {
  scheduleConfig = { ...scheduleConfig, ...newConfig };
  scheduleTask();
+}
+
+// requireAuth 中间件
+function requireAuth(req, res, next) {
+  if (!req.session.authenticated) {
+    return res.status(401).json({ success: false, message: '未授权访问' });
+  }
+  next();
 }
 
 // 路由
@@ -453,7 +467,7 @@ app.post('/login', (req, res) => {
 });
 
 // POST /logout - 处理登出
-app.post('/logout', (req, res) => {
+app.post('/logout', requireAuth, (req, res) => {
   const username = req.session.username || 'unknown';
   log(`登出请求: ${username}`);
 
@@ -467,7 +481,7 @@ app.post('/logout', (req, res) => {
 });
 
 // POST /run - 手动触发Puppeteer任务
-app.post('/run', async (req, res) => {
+app.post('/run', requireAuth, async (req, res) => {
   if (isRunning) {
     return res.status(409).json({ success: false, message: '任务正在运行中' });
   }
@@ -483,7 +497,7 @@ app.post('/run', async (req, res) => {
 });
 
 // GET /status - 获取当前状态
-app.get('/status', (req, res) => {
+app.get('/status', requireAuth, (req, res) => {
   res.json({
     status: currentStatus,
     isRunning,
@@ -492,7 +506,7 @@ app.get('/status', (req, res) => {
 });
 
 // GET /schedule - 获取定时配置
-app.get('/schedule', (req, res) => {
+app.get('/schedule', requireAuth, (req, res) => {
   res.json({
     enabled: scheduleConfig.enabled,
     time: scheduleConfig.time,
@@ -501,7 +515,7 @@ app.get('/schedule', (req, res) => {
 });
 
 // POST /schedule - 更新定时配置
-app.post('/schedule', (req, res) => {
+app.post('/schedule', requireAuth, (req, res) => {
   const { enabled, time } = req.body;
 
   if (typeof enabled !== 'boolean') {
