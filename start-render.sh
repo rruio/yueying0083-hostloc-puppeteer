@@ -7,10 +7,13 @@ set -e
 
 echo "启动Render环境中的Hostloc Puppeteer应用..."
 
+# 设置PATH包含当前目录（确保能找到wireproxy）
+export PATH="$PWD:$PATH"
+
 # 检查wireproxy是否已安装
 if ! command -v wireproxy &> /dev/null; then
-    echo "WireProxy未安装，尝试安装..."
-    go install github.com/pufferffish/wireproxy/cmd/wireproxy@latest
+    echo "错误: WireProxy未找到，请检查构建过程"
+    exit 1
 fi
 
 # 检查配置文件是否存在
