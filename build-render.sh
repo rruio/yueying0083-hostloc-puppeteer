@@ -24,6 +24,12 @@ wireproxy --version
 
 echo "WireProxy安装完成"
 
+# 安装Chrome浏览器
+echo "安装Chrome浏览器..."
+npx puppeteer browsers install chrome
+
+echo "Chrome浏览器安装完成"
+
 # 清理安装文件
 rm wireproxy_linux_amd64.tar.gz
 
