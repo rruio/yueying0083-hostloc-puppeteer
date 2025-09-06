@@ -80,13 +80,29 @@ async function runPuppeteerTask() {
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
 
     log('启动浏览器...');
+
+    // 检查WARP代理配置
+    const warpEnabled = process.env.WARP_ENABLED === 'true';
+    const warpSocks5Host = process.env.WARP_SOCKS5_HOST;
+    const warpSocks5Port = process.env.WARP_SOCKS5_PORT;
+
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ];
+
+    // 如果启用WARP代理，添加代理参数
+    if (warpEnabled && warpSocks5Host && warpSocks5Port) {
+      launchArgs.push(`--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`);
+      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`);
+    } else if (warpEnabled) {
+      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT');
+    }
+
     const browser = await puppeteer.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-      ],
+      args: launchArgs,
       ...(isLocal ? { slowMo: 50 } : {}),
     });
     const page = await browser.newPage();
