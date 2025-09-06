@@ -391,16 +391,16 @@ app.get('/', (req, res) => {
                     const result = await response.json();
 
                     if (result.success) {
-                        resultDiv.textContent = `[成功] WARP出口IP测试成功!\n出口IP: ${result.ip}\n代理: ${result.proxy}`;
+                        resultDiv.textContent = '[成功] WARP出口IP测试成功!\\n出口IP: ' + result.ip + '\\n代理: ' + result.proxy;
                         resultDiv.style.backgroundColor = '#d4edda';
                         resultDiv.style.color = '#155724';
                     } else {
-                        resultDiv.textContent = `[失败] 测试失败: ${result.message}`;
+                        resultDiv.textContent = '[失败] 测试失败: ' + result.message;
                         resultDiv.style.backgroundColor = '#f8d7da';
                         resultDiv.style.color = '#721c24';
                     }
                 } catch (error) {
-                    resultDiv.textContent = `[错误] 请求失败: ${error.message}`;
+                    resultDiv.textContent = '[错误] 请求失败: ' + error.message;
                     resultDiv.style.backgroundColor = '#f8d7da';
                     resultDiv.style.color = '#721c24';
                 }
