@@ -40,19 +40,86 @@ app.use(session({
 }));
 
 // 日志函数
-function log(message) {
+function log(message, accountId = null) {
   const timestamp = format(new Date(), 'yyyy-MM-dd HH:mm:ss');
-  const logMessage = `[${timestamp}] ${message}`;
+  const accountPrefix = accountId ? `[账号${accountId}] ` : '';
+  const logMessage = `[${timestamp}] ${accountPrefix}${message}`;
   console.log(logMessage);
   if (global.io) {
     global.io.emit('log', logMessage);
   }
 }
 
+// 账号管理函数
+function loadAccounts() {
+  const accountsEnv = process.env.HOSTLOC_ACCOUNTS;
+  accounts = [];
+
+  if (accountsEnv) {
+    try {
+      accounts = JSON.parse(accountsEnv);
+      log(`从环境变量加载了${accounts.length}个账号配置`);
+    } catch (error) {
+      log(`解析HOSTLOC_ACCOUNTS环境变量失败: ${error.message}`);
+    }
+  }
+
+  // 如果没有配置多个账号，尝试使用单个账号配置（向后兼容）
+  if (accounts.length === 0) {
+    const username = process.env.HOSTLOC_USERNAME;
+    const password = process.env.HOSTLOC_PASSWORD;
+
+    if (username && password) {
+      accounts.push({ username, password });
+      log('使用单个账号配置（向后兼容）');
+    }
+  }
+
+  return accounts;
+}
+
+function isAccountAvailableToday(accountId) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const lastRun = accountLastRun[accountId];
+  return lastRun !== today;
+}
+
+function getRandomAvailableAccount() {
+  // 重新加载账号配置（以防环境变量有更新）
+  loadAccounts();
+
+  if (accounts.length === 0) {
+    throw new Error('未配置任何账号');
+  }
+
+  // 过滤出今天还没执行过的账号
+  const availableAccounts = accounts
+    .map((account, index) => ({ ...account, id: index + 1 }))
+    .filter(account => isAccountAvailableToday(account.id));
+
+  if (availableAccounts.length === 0) {
+    throw new Error('今天所有账号都已执行过任务');
+  }
+
+  // 随机选择一个可用账号
+  const randomIndex = Math.floor(Math.random() * availableAccounts.length);
+  return availableAccounts[randomIndex];
+}
+
+function updateAccountLastRun(accountId) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  accountLastRun[accountId] = today;
+  log(`更新账号${accountId}最后执行日期为: ${today}`, accountId);
+}
+
 // 全局状态
 let isRunning = false;
 let lastRunTime = null;
 let currentStatus = 'idle';
+
+// 账号相关状态
+let accounts = [];
+let accountLastRun = {}; // 记录每个账号的最后执行日期，格式: {accountId: 'YYYY-MM-DD'}
 
 // 定时任务配置
 let scheduleConfig = {
@@ -64,22 +131,23 @@ let scheduledJob = null;
 
 // 提取Puppeteer任务逻辑为函数
 async function runPuppeteerTask() {
+  let selectedAccount = null;
+  let accountId = null;
+
   try {
     isRunning = true;
     currentStatus = 'running';
-    log('开始执行Puppeteer任务...');
 
-    // 从环境变量获取登录凭证
-    const username = process.env.HOSTLOC_USERNAME;
-    const password = process.env.HOSTLOC_PASSWORD;
+    // 随机选择可用账号
+    selectedAccount = getRandomAvailableAccount();
+    accountId = selectedAccount.id;
+    const { username, password } = selectedAccount;
 
-    if (!username || !password) {
-      throw new Error('请设置HOSTLOC_USERNAME和HOSTLOC_PASSWORD环境变量');
-    }
+    log('开始执行Puppeteer任务...', accountId);
+    log(`随机选择账号: ${username}`, accountId);
+    log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`, accountId);
 
-    log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
-
-    log('启动浏览器...');
+    log('启动浏览器...', accountId);
 
     // 检查WARP代理配置
     const warpEnabled = process.env.WARP_ENABLED === 'true';
@@ -95,9 +163,9 @@ async function runPuppeteerTask() {
     // 如果启用WARP代理，添加代理参数
     if (warpEnabled && warpSocks5Host && warpSocks5Port) {
       launchArgs.push(`--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`);
-      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`);
+      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`, accountId);
     } else if (warpEnabled) {
-      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT');
+      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT', accountId);
     }
 
     const browser = await puppeteer.launch({
@@ -108,20 +176,20 @@ async function runPuppeteerTask() {
     const page = await browser.newPage();
 
     // 访问hostloc并登录
-    log('访问hostloc论坛...');
+    log('访问hostloc论坛...', accountId);
     await page.goto('https://hostloc.com/forum-45-1.html');
 
-    log('输入用户名和密码...');
+    log('输入用户名和密码...', accountId);
     await page.type('#ls_username', username);
     await page.type('#ls_password', password);
-    log('提交登录表单...');
+    log('提交登录表单...', accountId);
     await page.click('button[type="submit"]');
 
     // 等待登录完成并验证
     await page.waitForNavigation();
 
     // 检查用户空间链接是否存在以确认登录成功
-    log('等待登录成功...');
+    log('等待登录成功...', accountId);
     const loggedIn = await page.evaluate((username) => {
       return !!document.querySelector(
         `a[href^="space-uid-"][title="访问我的空间"]`
@@ -132,17 +200,17 @@ async function runPuppeteerTask() {
       throw new Error('登录失败，未找到用户空间链接');
     }
 
-    log('登录成功!');
+    log('登录成功!', accountId);
     await page.evaluate(() => console.log('登录成功'));
 
-    log('开始随机访问20个用户空间...');
+    log('开始随机访问20个用户空间...', accountId);
     for (let i = 0; i < 20; i++) {
       const randomUid = Math.floor(Math.random() * 31210);
-      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`);
+      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`, accountId);
       try {
         await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
       } catch (error) {
-        log(`访问用户空间失败: ${error.message}`);
+        log(`访问用户空间失败: ${error.message}`, accountId);
       }
       await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
     }
@@ -150,10 +218,14 @@ async function runPuppeteerTask() {
     await browser.close();
     lastRunTime = new Date();
     currentStatus = 'completed';
-    log('任务完成');
+
+    // 更新账号最后执行记录
+    updateAccountLastRun(accountId);
+
+    log('任务完成', accountId);
   } catch (error) {
     currentStatus = 'error';
-    log(`任务执行出错: ${error.message}`);
+    log(`任务执行出错: ${error.message}`, accountId);
     throw error;
   } finally {
     isRunning = false;
