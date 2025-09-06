@@ -1,7 +1,7 @@
 # Hostloc Puppeteer 自动化脚本
 
 这是一个基于Puppeteer的Hostloc论坛自动化工具，支持用户空间访问和定时任务执行。项目已优化为在Render.com等云平台上稳定运行。
-
+Hostloc的签到就是要访问20个用户的空间，这个运行逻辑不能删改
 ## 最新更新
 - 使用更稳定的元素选择器 `input[name="username"]` 和 `input[name="password"]`
 - 集成测试和生产环境到单个文件 `index.js`
