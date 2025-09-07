@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
-const { format } = require('date-fns');
+const { format, addDays } = require('date-fns');
 const schedule = require('node-schedule');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -76,6 +76,42 @@ function loadAccounts() {
   }
 
   return accounts;
+}
+
+// 计算下一个账号运行的预计时间
+function calculateNextAccountRunTime() {
+  // 重新加载账号配置（以防环境变量有更新）
+  loadAccounts();
+
+  if (accounts.length === 0) {
+    return null; // 没有账号
+  }
+
+  // 过滤出今天还没执行过的账号
+  const availableAccounts = accounts
+    .map((account, index) => ({ ...account, id: index + 1 }))
+    .filter(account => isAccountAvailableToday(account.id));
+
+  if (availableAccounts.length > 0) {
+    // 有可用账号
+    if (scheduleConfig.enabled && scheduleConfig.nextRun) {
+      return scheduleConfig.nextRun;
+    } else {
+      // 定时任务禁用，返回当前时间（表示随时可手动触发）
+      return new Date();
+    }
+  } else {
+    // 所有账号都执行过了，返回明天定时任务的时间
+    if (scheduleConfig.enabled) {
+      // 计算明天早上8点（假设 cron 是 '0 8 * * *'）
+      const tomorrow = addDays(new Date(), 1);
+      tomorrow.setHours(8, 0, 0, 0);
+      return tomorrow;
+    } else {
+      // 定时任务禁用，返回明天当前时间
+      return addDays(new Date(), 1);
+    }
+  }
 }
 
 function isAccountAvailableToday(accountId) {
@@ -223,6 +259,14 @@ async function runPuppeteerTask() {
     updateAccountLastRun(accountId);
 
     log('任务完成', accountId);
+
+    // 显示下一个账号运行的预计时间
+    const nextRunTime = calculateNextAccountRunTime();
+    if (nextRunTime) {
+      log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`, accountId);
+    } else {
+      log('没有配置账号，无法计算下次运行时间', accountId);
+    }
   } catch (error) {
     currentStatus = 'error';
     log(`任务执行出错: ${error.message}`, accountId);
@@ -844,6 +888,14 @@ const server = app.listen(PORT, () => {
   log(`服务器运行在端口 ${PORT}`);
   // 初始化定时任务
   scheduleTask();
+
+  // 显示下一个账号运行的预计时间
+  const nextRunTime = calculateNextAccountRunTime();
+  if (nextRunTime) {
+    log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`);
+  } else {
+    log('没有配置账号，无法计算下次运行时间');
+  }
 });
 
 const io = new Server(server);
