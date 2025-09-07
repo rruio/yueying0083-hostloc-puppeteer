@@ -842,6 +842,8 @@ app.get('/accounts', requireAuth, (req, res) => {
 // 启动服务器
 const server = app.listen(PORT, () => {
   log(`服务器运行在端口 ${PORT}`);
+  // 初始化定时任务
+  scheduleTask();
 });
 
 const io = new Server(server);
