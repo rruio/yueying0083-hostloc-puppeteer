@@ -495,7 +495,7 @@ class WarpManager {
 
   /**
    * 获取当前出口IP
-   * 通过httpbin.org/ip获取当前IP地址，支持缓存机制
+   * 通过多个IP检测API获取当前IP地址，支持故障转移和缓存机制
    */
   async getCurrentWarpIp(accountId = null) {
     const now = Date.now();
@@ -508,13 +508,92 @@ class WarpManager {
 
     const startTime = now;
 
+    // IP检测API配置数组，按优先级排序
+    const ipApis = [
+      {
+        name: 'ip-api.com',
+        hostname: 'ip-api.com',
+        port: 80,
+        path: '/json/',
+        method: 'GET',
+        responseType: 'json',
+        ipField: 'query',
+        timeout: 10000
+      },
+      {
+        name: 'icanhazip.com',
+        hostname: 'icanhazip.com',
+        port: 80,
+        path: '/',
+        method: 'GET',
+        responseType: 'text',
+        timeout: 10000
+      },
+      {
+        name: 'ipify.org',
+        hostname: 'api.ipify.org',
+        port: 80,
+        path: '/',
+        method: 'GET',
+        responseType: 'text',
+        timeout: 10000
+      }
+    ];
+
+    this.log(`开始获取出口IP，通过代理 ${this.socks5Host}:${this.socks5Port}，尝试 ${ipApis.length} 个API`, accountId);
+
+    // 尝试每个API直到成功
+    for (let i = 0; i < ipApis.length; i++) {
+      const api = ipApis[i];
+      const attemptStartTime = Date.now();
+
+      try {
+        this.log(`尝试API ${i + 1}/${ipApis.length}: ${api.name}`, accountId);
+
+        const ip = await this.tryGetIpFromApi(api, accountId);
+        const attemptDuration = Date.now() - attemptStartTime;
+
+        if (!ip || ip === '127.0.0.1' || ip === 'localhost') {
+          this.log(`API ${api.name} 返回无效IP地址: ${ip}，尝试下一个API`, accountId);
+          continue;
+        }
+
+        // 更新缓存
+        this.ipCache = ip;
+        this.ipCacheExpiry = Date.now() + this.ipCacheDuration;
+
+        const totalDuration = Date.now() - startTime;
+        this.log(`成功获取出口IP: ${ip} (使用 ${api.name}，总耗时: ${totalDuration}ms)`, accountId);
+        return ip;
+
+      } catch (error) {
+        const attemptDuration = Date.now() - attemptStartTime;
+        this.log(`API ${api.name} 失败 (耗时: ${attemptDuration}ms): ${error.message}`, accountId);
+
+        // 如果是最后一个API，抛出错误
+        if (i === ipApis.length - 1) {
+          const totalDuration = Date.now() - startTime;
+          this.log(`所有 ${ipApis.length} 个API都失败，总耗时: ${totalDuration}ms`, accountId);
+          throw new Error(`所有IP检测API都失败，最后一次错误: ${error.message}`);
+        }
+
+        // 继续尝试下一个API
+        continue;
+      }
+    }
+  }
+
+  /**
+   * 尝试从指定API获取IP地址
+   */
+  async tryGetIpFromApi(api, accountId = null) {
     return new Promise((resolve, reject) => {
       const options = {
-        hostname: 'httpbin.org',
-        port: 443,
-        path: '/ip',
-        method: 'GET',
-        timeout: 15000, // 增加超时时间
+        hostname: api.hostname,
+        port: api.port,
+        path: api.path,
+        method: api.method,
+        timeout: api.timeout,
         headers: {
           'User-Agent': 'WireProxy-HealthCheck/1.0'
         },
@@ -522,9 +601,7 @@ class WarpManager {
         agent: new SocksProxyAgent(`socks5://${this.socks5Host}:${this.socks5Port}`)
       };
 
-      this.log(`开始获取出口IP，通过代理 ${this.socks5Host}:${this.socks5Port}`, accountId);
-
-      const req = https.request(options, (res) => {
+      const req = (api.port === 443 ? https : http).request(options, (res) => {
         let data = '';
 
         res.on('data', (chunk) => {
@@ -532,42 +609,37 @@ class WarpManager {
         });
 
         res.on('end', () => {
-          const duration = Date.now() - startTime;
-          this.log(`IP请求完成，耗时: ${duration}ms`, accountId);
-
           try {
-            const jsonData = JSON.parse(data);
-            const ip = jsonData.origin;
+            let ip;
 
-            if (!ip || ip === '127.0.0.1' || ip === 'localhost') {
-              reject(new Error(`获取到无效IP地址: ${ip}`));
+            if (api.responseType === 'json') {
+              const jsonData = JSON.parse(data);
+              ip = jsonData[api.ipField] || jsonData.origin;
+            } else if (api.responseType === 'text') {
+              ip = data.trim();
+            }
+
+            // 验证IP地址格式
+            const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+            if (!ipRegex.test(ip)) {
+              reject(new Error(`无效的IP地址格式: ${ip}`));
               return;
             }
 
-            // 更新缓存
-            this.ipCache = ip;
-            this.ipCacheExpiry = Date.now() + this.ipCacheDuration;
-
-            this.log(`成功获取出口IP: ${ip}`, accountId);
             resolve(ip);
           } catch (error) {
-            this.log(`解析IP响应失败: ${error.message}`, accountId);
-            reject(new Error(`解析IP响应失败: ${error.message}`));
+            reject(new Error(`解析API响应失败: ${error.message}`));
           }
         });
       });
 
       req.on('error', (error) => {
-        const duration = Date.now() - startTime;
-        this.log(`获取IP请求失败，耗时: ${duration}ms, 错误: ${error.message}`, accountId);
-        reject(new Error(`获取IP失败: ${error.message}`));
+        reject(new Error(`API请求失败: ${error.message}`));
       });
 
       req.on('timeout', () => {
-        const duration = Date.now() - startTime;
-        this.log(`获取IP请求超时，耗时: ${duration}ms`, accountId);
         req.destroy();
-        reject(new Error('获取IP请求超时'));
+        reject(new Error('API请求超时'));
       });
 
       req.end();
