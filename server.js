@@ -50,8 +50,27 @@ function log(message, accountId = null) {
   }
 }
 
-// 账号管理函数
-function loadAccounts() {
+// 计算环境变量哈希值的函数
+function calculateEnvHash() {
+  const crypto = require('crypto');
+  const accountsEnv = process.env.HOSTLOC_ACCOUNTS || '';
+  const username = process.env.HOSTLOC_USERNAME || '';
+  const password = process.env.HOSTLOC_PASSWORD || '';
+  const envString = accountsEnv + username + password;
+  return crypto.createHash('md5').update(envString).digest('hex');
+}
+
+// 账号管理函数（带缓存机制）
+function loadAccounts(forceReload = false) {
+  const currentEnvHash = calculateEnvHash();
+
+  // 如果不是强制重新加载且缓存有效，直接返回缓存的账号
+  if (!forceReload && accountsCache.envHash === currentEnvHash && accountsCache.accounts.length > 0) {
+    accounts = accountsCache.accounts;
+    return accounts;
+  }
+
+  // 重新加载账号配置
   const accountsEnv = process.env.HOSTLOC_ACCOUNTS;
   accounts = [];
 
@@ -75,13 +94,18 @@ function loadAccounts() {
     }
   }
 
+  // 更新缓存
+  accountsCache.accounts = accounts;
+  accountsCache.envHash = currentEnvHash;
+  accountsCache.lastLoadTime = new Date();
+
   return accounts;
 }
 
 // 计算下一个账号运行的预计时间
 function calculateNextAccountRunTime() {
-  // 重新加载账号配置（以防环境变量有更新）
-  loadAccounts();
+  // 强制重新加载账号配置（以防环境变量有更新）
+  loadAccounts(true);
 
   if (accounts.length === 0) {
     return null; // 没有账号
@@ -118,8 +142,8 @@ function isAccountAvailableToday(accountId) {
 }
 
 function getRandomAvailableAccount() {
-  // 重新加载账号配置（以防环境变量有更新）
-  loadAccounts();
+  // 强制重新加载账号配置（以防环境变量有更新）
+  loadAccounts(true);
 
   if (accounts.length === 0) {
     throw new Error('未配置任何账号');
@@ -153,6 +177,13 @@ let currentStatus = 'idle';
 // 账号相关状态
 let accounts = [];
 let accountLastRun = {}; // 记录每个账号的最后执行日期，格式: {accountId: 'YYYY-MM-DD'}
+
+// 账号配置缓存
+let accountsCache = {
+  accounts: [],
+  envHash: null, // 环境变量的哈希值，用于检测变化
+  lastLoadTime: null
+};
 
 // 定时任务配置
 let scheduleConfig = {
@@ -257,8 +288,8 @@ async function runPuppeteerTask() {
 
     log('任务完成', accountId);
 
-    // 检查是否还有其他账号需要执行
-    loadAccounts();
+    // 检查是否还有其他账号需要执行（强制重新加载以获取最新配置）
+    loadAccounts(true);
     const availableAccounts = accounts
       .map((account, index) => ({ ...account, id: index + 1 }))
       .filter(account => isAccountAvailableToday(account.id));
@@ -391,8 +422,8 @@ async function runPuppeteerTaskSkipDelay() {
 
     log('任务完成（跳过延时模式）', accountId);
 
-    // 检查是否还有其他账号需要执行
-    loadAccounts();
+    // 检查是否还有其他账号需要执行（强制重新加载以获取最新配置）
+    loadAccounts(true);
     const availableAccounts = accounts
       .map((account, index) => ({ ...account, id: index + 1 }))
       .filter(account => isAccountAvailableToday(account.id));
@@ -908,8 +939,8 @@ app.post('/run-next-account', requireAuth, async (req, res) => {
   }
 
   try {
-    // 检查是否有可用账号
-    loadAccounts();
+    // 检查是否有可用账号（强制重新加载以获取最新配置）
+    loadAccounts(true);
     const availableAccounts = accounts
       .map((account, index) => ({ ...account, id: index + 1 }))
       .filter(account => isAccountAvailableToday(account.id));
@@ -929,8 +960,7 @@ app.post('/run-next-account', requireAuth, async (req, res) => {
 
 // GET /status - 获取当前状态
 app.get('/status', requireAuth, (req, res) => {
-  // 检查是否有可用账号
-  loadAccounts();
+  // 使用缓存的账号配置，避免每次都重新加载
   const availableAccounts = accounts
     .map((account, index) => ({ ...account, id: index + 1 }))
     .filter(account => isAccountAvailableToday(account.id));
@@ -1102,9 +1132,7 @@ app.get('/accounts', requireAuth, (req, res) => {
 // GET /available-accounts - 检查是否有可用账号
 app.get('/available-accounts', requireAuth, (req, res) => {
   try {
-    // 重新加载账号配置（以防环境变量有更新）
-    loadAccounts();
-
+    // 使用缓存的账号配置，避免每次都重新加载
     if (accounts.length === 0) {
       return res.json({
         success: true,
@@ -1133,6 +1161,11 @@ app.get('/available-accounts', requireAuth, (req, res) => {
 // 启动服务器
 const server = app.listen(PORT, () => {
   log(`服务器运行在端口 ${PORT}`);
+
+  // 初始化账号配置（强制加载一次以填充缓存）
+  loadAccounts(true);
+  log(`初始化完成，已加载${accounts.length}个账号配置`);
+
   // 初始化定时任务
   scheduleTask();
 
