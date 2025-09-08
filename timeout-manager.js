@@ -161,7 +161,7 @@ class LoopController {
     this.onIterationComplete = options.onIterationComplete || null;
     this.onLoopComplete = options.onLoopComplete || null;
     this.onError = options.onError || null;
-    this.abortController = new AbortController();
+    // 移除构造函数中的AbortController初始化，将在execute方法中动态创建
   }
 
   /**
@@ -169,6 +169,9 @@ class LoopController {
    */
   async execute(operation, options = {}) {
     const { accountId = null } = options;
+
+    // 在每次execute调用开始时创建新的AbortController
+    this.abortController = new AbortController();
 
     this.isRunning = true;
     this.isPaused = false;
@@ -191,10 +194,11 @@ class LoopController {
               reject(new Error(`Iteration ${this.currentIteration} timeout after ${this.timeoutPerIteration}ms`));
             }, this.timeoutPerIteration);
 
+            // 使用{ once: true }防止监听器累积
             this.abortController.signal.addEventListener('abort', () => {
               clearTimeout(timeout);
               reject(new Error('Operation aborted'));
-            });
+            }, { once: true });
           });
 
           const operationPromise = operation(this.currentIteration, accountId);
@@ -250,7 +254,10 @@ class LoopController {
    */
   stop() {
     this.isRunning = false;
-    this.abortController.abort();
+    this.isPaused = false;
+    if (this.abortController) {
+      this.abortController.abort();
+    }
   }
 
   /**
@@ -280,6 +287,19 @@ class LoopController {
       maxIterations: this.maxIterations,
       progress: this.maxIterations === Infinity ? 0 : (this.currentIteration / this.maxIterations) * 100
     };
+  }
+
+  /**
+   * 重置实例状态，支持重用
+   */
+  reset() {
+    this.isRunning = false;
+    this.isPaused = false;
+    this.currentIteration = 0;
+    // 清理AbortController
+    if (this.abortController) {
+      this.abortController = null;
+    }
   }
 }
 
