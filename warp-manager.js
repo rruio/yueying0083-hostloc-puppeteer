@@ -25,7 +25,7 @@ class WarpManager {
     this.tempConfigPath = null; // 临时配置文件路径
     this.ipCache = null; // IP缓存
     this.ipCacheExpiry = null; // IP缓存过期时间
-    this.ipCacheDuration = 5 * 60 * 1000; // IP缓存5分钟
+    this.ipCacheDuration = 10 * 60 * 1000; // IP缓存10分钟
   }
 
   /**
