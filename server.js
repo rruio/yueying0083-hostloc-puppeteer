@@ -93,13 +93,10 @@ function calculateNextAccountRunTime() {
     .filter(account => isAccountAvailableToday(account.id));
 
   if (availableAccounts.length > 0) {
-    // 有可用账号
-    if (scheduleConfig.enabled && scheduleConfig.nextRun) {
-      return scheduleConfig.nextRun;
-    } else {
-      // 定时任务禁用，返回当前时间（表示随时可手动触发）
-      return new Date();
-    }
+    // 有可用账号，计算随机延迟时间（5-30分钟）
+    const randomDelayMinutes = Math.floor(Math.random() * (30 - 5 + 1)) + 5;
+    const randomDelayMs = randomDelayMinutes * 60 * 1000;
+    return new Date(Date.now() + randomDelayMs);
   } else {
     // 所有账号都执行过了，返回明天定时任务的时间
     if (scheduleConfig.enabled) {
@@ -260,12 +257,35 @@ async function runPuppeteerTask() {
 
     log('任务完成', accountId);
 
-    // 显示下一个账号运行的预计时间
-    const nextRunTime = calculateNextAccountRunTime();
-    if (nextRunTime) {
+    // 检查是否还有其他账号需要执行
+    loadAccounts();
+    const availableAccounts = accounts
+      .map((account, index) => ({ ...account, id: index + 1 }))
+      .filter(account => isAccountAvailableToday(account.id));
+
+    if (availableAccounts.length > 0) {
+      // 生成随机延迟时间（5-30分钟）
+      const randomDelayMinutes = Math.floor(Math.random() * (30 - 5 + 1)) + 5;
+      const randomDelayMs = randomDelayMinutes * 60 * 1000;
+      const nextRunTime = new Date(Date.now() + randomDelayMs);
+
+      log(`发现${availableAccounts.length}个可用账号，将在${randomDelayMinutes}分钟后自动执行下一个账号`, accountId);
       log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`, accountId);
+
+      // 设置定时器自动执行下一个账号
+      setTimeout(async () => {
+        if (!isRunning) {
+          try {
+            await runPuppeteerTask();
+          } catch (error) {
+            log(`自动执行下一个账号失败: ${error.message}`);
+          }
+        } else {
+          log('定时器触发时任务正在运行中，跳过自动执行');
+        }
+      }, randomDelayMs);
     } else {
-      log('没有配置账号，无法计算下次运行时间', accountId);
+      log('今天所有账号都已执行完成', accountId);
     }
   } catch (error) {
     currentStatus = 'error';
