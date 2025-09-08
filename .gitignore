@@ -21,3 +21,15 @@ wgcf-account.toml
 wgcf_2.2.26_linux_amd64
 wgcf_2.2.29_linux_amd64
 wgcf-profile.conf
+coverage/clover.xml
+coverage/coverage-final.json
+coverage/lcov.info
+coverage/lcov-report/base.css
+coverage/lcov-report/block-navigation.js
+coverage/lcov-report/favicon.png
+coverage/lcov-report/index.html
+coverage/lcov-report/prettify.css
+coverage/lcov-report/prettify.js
+coverage/lcov-report/sort-arrow-sprite.png
+coverage/lcov-report/sorter.js
+coverage/lcov-report/timeout-manager.js.html
