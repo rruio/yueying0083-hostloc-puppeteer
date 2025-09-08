@@ -4,6 +4,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 // Add stealth plugin
 puppeteer.use(StealthPlugin());
 const { format } = require('date-fns');
+const warpManager = require('./warp-manager');
 
 // 加载环境变量
 const isLocal = process.env.NODE_ENV === 'test';
@@ -60,6 +61,20 @@ async function signInForAccount(account, accountId) {
   let browser;
   try {
     log('开始执行签到任务', accountId);
+
+    // 执行IP轮换（如果启用）
+    if (warpManager.isEnabled()) {
+      try {
+        log('开始IP轮换...', accountId);
+        const rotationResult = await warpManager.rotateIp(accountId);
+        if (rotationResult) {
+          log(`IP轮换完成: ${rotationResult.oldIp} -> ${rotationResult.newIp}`, accountId);
+        }
+      } catch (error) {
+        log(`IP轮换失败，但继续执行签到: ${error.message}`, accountId);
+        // IP轮换失败不影响签到流程，继续执行
+      }
+    }
 
     // 本地测试时显示浏览器
     const isLocal = process.env.NODE_ENV === 'test';

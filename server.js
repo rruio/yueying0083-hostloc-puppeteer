@@ -6,6 +6,7 @@ const schedule = require('node-schedule');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { Server } = require('socket.io');
+const warpManager = require('./warp-manager');
 
 // Add stealth plugin
 puppeteer.use(StealthPlugin());
@@ -211,6 +212,20 @@ async function runPuppeteerTask() {
     log(`随机选择账号: ${username}`, accountId);
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`, accountId);
 
+    // 执行IP轮换（如果启用）
+    if (warpManager.isEnabled()) {
+      try {
+        log('开始IP轮换...', accountId);
+        const rotationResult = await warpManager.rotateIp(accountId);
+        if (rotationResult) {
+          log(`IP轮换完成: ${rotationResult.oldIp} -> ${rotationResult.newIp}`, accountId);
+        }
+      } catch (error) {
+        log(`IP轮换失败，但继续执行签到: ${error.message}`, accountId);
+        // IP轮换失败不影响签到流程，继续执行
+      }
+    }
+
     log('启动浏览器...', accountId);
 
     // 检查WARP代理配置
@@ -344,6 +359,20 @@ async function runPuppeteerTaskSkipDelay() {
     log('开始执行Puppeteer任务（跳过延时）...', accountId);
     log(`随机选择账号: ${username}`, accountId);
     log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`, accountId);
+
+    // 执行IP轮换（如果启用）
+    if (warpManager.isEnabled()) {
+      try {
+        log('开始IP轮换...', accountId);
+        const rotationResult = await warpManager.rotateIp(accountId);
+        if (rotationResult) {
+          log(`IP轮换完成: ${rotationResult.oldIp} -> ${rotationResult.newIp}`, accountId);
+        }
+      } catch (error) {
+        log(`IP轮换失败，但继续执行签到: ${error.message}`, accountId);
+        // IP轮换失败不影响签到流程，继续执行
+      }
+    }
 
     log('启动浏览器...', accountId);
 
