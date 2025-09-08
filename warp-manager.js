@@ -1,7 +1,9 @@
 const { exec, spawn } = require('child_process');
 const https = require('https');
 const http = require('http');
+const net = require('net');
 const { format } = require('date-fns');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
 /**
  * WARP IP轮换管理器
@@ -14,6 +16,12 @@ class WarpManager {
     this.socks5Port = process.env.WARP_SOCKS5_PORT || '1080';
     this.wireproxyConfigPath = process.env.WIREPROXY_CONFIG_PATH || './wireproxy.conf';
     this.wireproxyBinary = process.env.WIREPROXY_BINARY || 'wireproxy';
+    this.wireproxyProcess = null;
+    this.startupTimeout = null;
+    this.healthCheckInterval = null;
+    this.lastHealthCheck = null;
+    this.healthCheckFailures = 0;
+    this.maxHealthCheckFailures = 3;
   }
 
   /**
@@ -100,59 +108,298 @@ class WarpManager {
   }
 
   /**
+   * 检查端口是否正在监听
+   */
+  async checkPortListening(host, port, timeout = 5000) {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, timeout);
+
+      socket.connect(port, host, () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+
+      socket.on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+  }
+
+  /**
    * 启动WireProxy
    */
   async startWireproxy(accountId = null) {
-    return new Promise((resolve, reject) => {
-      this.log(`启动WireProxy: ${this.wireproxyBinary} -c ${this.wireproxyConfigPath}`, accountId);
+    return new Promise(async (resolve, reject) => {
+      try {
+        this.log(`启动WireProxy: ${this.wireproxyBinary} -c ${this.wireproxyConfigPath}`, accountId);
 
-      const wireproxyProcess = spawn(this.wireproxyBinary, ['-c', this.wireproxyConfigPath], {
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-
-      // 设置子进程独立运行
-      wireproxyProcess.unref();
-
-      // 监听输出
-      let startupTimeout = setTimeout(() => {
-        reject(new Error('WireProxy启动超时'));
-      }, 30000); // 30秒超时
-
-      wireproxyProcess.stdout.on('data', (data) => {
-        const output = data.toString();
-        this.log(`WireProxy输出: ${output.trim()}`, accountId);
-
-        // 检查是否成功启动
-        if (output.includes('SOCKS5') || output.includes('listening') || output.includes('ready')) {
-          clearTimeout(startupTimeout);
-          resolve();
+        // 检查配置文件是否存在
+        const fs = require('fs');
+        if (!fs.existsSync(this.wireproxyConfigPath)) {
+          throw new Error(`WireProxy配置文件不存在: ${this.wireproxyConfigPath}`);
         }
-      });
 
-      wireproxyProcess.stderr.on('data', (data) => {
-        const error = data.toString();
-        this.log(`WireProxy错误: ${error.trim()}`, accountId);
-      });
+        // 检查WireProxy二进制文件是否存在
+        try {
+          await this.execPromise(`which ${this.wireproxyBinary}`);
+        } catch (error) {
+          throw new Error(`WireProxy二进制文件未找到: ${this.wireproxyBinary}`);
+        }
 
-      wireproxyProcess.on('error', (error) => {
-        clearTimeout(startupTimeout);
+        // 启动WireProxy进程
+        this.wireproxyProcess = spawn(this.wireproxyBinary, ['-c', this.wireproxyConfigPath], {
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+
+        // 设置子进程独立运行
+        this.wireproxyProcess.unref();
+
+        this.log(`WireProxy进程已启动，PID: ${this.wireproxyProcess.pid}`, accountId);
+
+        // 设置启动超时
+        this.startupTimeout = setTimeout(() => {
+          this.log('WireProxy启动超时，正在终止进程...', accountId);
+          this.wireproxyProcess.kill('SIGTERM');
+          setTimeout(() => {
+            if (!this.wireproxyProcess.killed) {
+              this.wireproxyProcess.kill('SIGKILL');
+            }
+          }, 5000);
+          reject(new Error('WireProxy启动超时'));
+        }, 30000);
+
+        let startupDetected = false;
+
+        // 监听stdout
+        this.wireproxyProcess.stdout.on('data', (data) => {
+          const output = data.toString();
+          this.log(`WireProxy输出: ${output.trim()}`, accountId);
+
+          // 检查启动成功标志
+          if (!startupDetected && (output.includes('SOCKS5') || output.includes('listening') || output.includes('ready'))) {
+            startupDetected = true;
+            this.log('检测到WireProxy启动成功信号', accountId);
+          }
+        });
+
+        // 监听stderr
+        this.wireproxyProcess.stderr.on('data', (data) => {
+          const error = data.toString();
+          this.log(`WireProxy错误: ${error.trim()}`, accountId);
+        });
+
+        // 监听进程错误
+        this.wireproxyProcess.on('error', (error) => {
+          this.clearStartupTimeout();
+          this.log(`WireProxy进程启动失败: ${error.message}`, accountId);
+          reject(new Error(`WireProxy进程启动失败: ${error.message}`));
+        });
+
+        // 监听进程退出
+        this.wireproxyProcess.on('close', (code) => {
+          this.clearStartupTimeout();
+          if (code !== 0 && code !== null) {
+            this.log(`WireProxy进程异常退出，退出码: ${code}`, accountId);
+            reject(new Error(`WireProxy进程异常退出，退出码: ${code}`));
+          }
+        });
+
+        // 定期检查端口是否监听
+        const portCheckInterval = setInterval(async () => {
+          if (await this.checkPortListening(this.socks5Host, parseInt(this.socks5Port))) {
+            clearInterval(portCheckInterval);
+            this.clearStartupTimeout();
+            this.log(`WireProxy端口 ${this.socks5Host}:${this.socks5Port} 已开始监听`, accountId);
+
+            // 启动健康检查
+            this.startHealthCheck(accountId);
+
+            resolve();
+          }
+        }, 1000);
+
+        // 如果10秒后仍未检测到端口监听，则认为启动失败
+        setTimeout(() => {
+          if (!this.wireproxyProcess.killed) {
+            clearInterval(portCheckInterval);
+            this.clearStartupTimeout();
+            this.log('WireProxy端口监听检测超时', accountId);
+            reject(new Error('WireProxy端口监听检测超时'));
+          }
+        }, 10000);
+
+      } catch (error) {
+        this.clearStartupTimeout();
+        this.log(`启动WireProxy失败: ${error.message}`, accountId);
         reject(error);
+      }
+    });
+  }
+
+  /**
+   * 清除启动超时
+   */
+  clearStartupTimeout() {
+    if (this.startupTimeout) {
+      clearTimeout(this.startupTimeout);
+      this.startupTimeout = null;
+    }
+  }
+
+  /**
+   * 启动健康检查
+   */
+  startHealthCheck(accountId = null) {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    this.healthCheckInterval = setInterval(async () => {
+      try {
+        const isHealthy = await this.performHealthCheck(accountId);
+        if (isHealthy) {
+          this.lastHealthCheck = new Date();
+          this.healthCheckFailures = 0;
+        } else {
+          this.healthCheckFailures++;
+          this.log(`健康检查失败 ${this.healthCheckFailures}/${this.maxHealthCheckFailures}`, accountId);
+
+          if (this.healthCheckFailures >= this.maxHealthCheckFailures) {
+            this.log('健康检查失败次数过多，准备重启WireProxy', accountId);
+            this.restartWireproxyOnFailure(accountId);
+          }
+        }
+      } catch (error) {
+        this.healthCheckFailures++;
+        this.log(`健康检查异常: ${error.message}`, accountId);
+
+        if (this.healthCheckFailures >= this.maxHealthCheckFailures) {
+          this.log('健康检查异常次数过多，准备重启WireProxy', accountId);
+          this.restartWireproxyOnFailure(accountId);
+        }
+      }
+    }, 30000); // 每30秒检查一次
+
+    this.log('WireProxy健康检查已启动', accountId);
+  }
+
+  /**
+   * 执行健康检查
+   */
+  async performHealthCheck(accountId = null) {
+    try {
+      // 1. 检查端口是否监听
+      const portListening = await this.checkPortListening(this.socks5Host, parseInt(this.socks5Port), 2000);
+      if (!portListening) {
+        this.log('健康检查失败: SOCKS5端口未监听', accountId);
+        return false;
+      }
+
+      // 2. 测试SOCKS5代理连接
+      const proxyWorking = await this.testSocks5Proxy(accountId);
+      if (!proxyWorking) {
+        this.log('健康检查失败: SOCKS5代理测试失败', accountId);
+        return false;
+      }
+
+      // 3. 测试网络连通性
+      const networkWorking = await this.testNetworkConnectivity(accountId);
+      if (!networkWorking) {
+        this.log('健康检查失败: 网络连通性测试失败', accountId);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      this.log(`健康检查过程中发生错误: ${error.message}`, accountId);
+      return false;
+    }
+  }
+
+  /**
+   * 测试SOCKS5代理
+   */
+  async testSocks5Proxy(accountId = null) {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 5000);
+
+      socket.connect(parseInt(this.socks5Port), this.socks5Host, () => {
+        // 发送SOCKS5握手
+        const handshake = Buffer.from([0x05, 0x01, 0x00]); // SOCKS5, 1 method, no auth
+        socket.write(handshake);
       });
 
-      wireproxyProcess.on('close', (code) => {
-        clearTimeout(startupTimeout);
-        if (code !== 0) {
-          reject(new Error(`WireProxy进程异常退出，退出码: ${code}`));
+      socket.on('data', (data) => {
+        clearTimeout(timeout);
+        // 检查SOCKS5响应
+        if (data.length >= 2 && data[0] === 0x05 && data[1] === 0x00) {
+          socket.destroy();
+          resolve(true);
+        } else {
+          socket.destroy();
+          resolve(false);
         }
       });
 
-      // 如果没有检测到启动信息，3秒后也认为启动成功
-      setTimeout(() => {
-        clearTimeout(startupTimeout);
-        resolve();
-      }, 3000);
+      socket.on('error', () => {
+        clearTimeout(timeout);
+        resolve(false);
+      });
     });
+  }
+
+  /**
+   * 测试网络连通性
+   */
+  async testNetworkConnectivity(accountId = null) {
+    try {
+      const ip = await this.getCurrentWarpIp(accountId);
+      return ip && ip !== '127.0.0.1' && ip !== 'localhost';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * 故障时重启WireProxy
+   */
+  async restartWireproxyOnFailure(accountId = null) {
+    try {
+      this.log('开始故障恢复: 重启WireProxy', accountId);
+      await this.restartWarpService(accountId);
+      this.healthCheckFailures = 0;
+      this.log('WireProxy故障恢复完成', accountId);
+    } catch (error) {
+      this.log(`WireProxy故障恢复失败: ${error.message}`, accountId);
+      // 如果恢复失败，增加重试间隔
+      if (this.healthCheckInterval) {
+        clearInterval(this.healthCheckInterval);
+        this.healthCheckInterval = setInterval(async () => {
+          await this.restartWireproxyOnFailure(accountId);
+        }, 60000); // 1分钟后重试
+      }
+    }
+  }
+
+  /**
+   * 停止健康检查
+   */
+  stopHealthCheck() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
   }
 
   /**
@@ -161,8 +408,9 @@ class WarpManager {
   async waitForWarpReady(accountId = null, maxRetries = 10) {
     for (let i = 0; i < maxRetries; i++) {
       try {
-        const ip = await this.getCurrentWarpIp(accountId);
-        if (ip) {
+        const isHealthy = await this.performHealthCheck(accountId);
+        if (isHealthy) {
+          const ip = await this.getCurrentWarpIp(accountId);
           this.log(`Warp服务就绪，当前IP: ${ip}`, accountId);
           return true;
         }
@@ -179,16 +427,23 @@ class WarpManager {
    * 通过httpbin.org/ip获取当前IP地址
    */
   async getCurrentWarpIp(accountId = null) {
+    const startTime = Date.now();
+
     return new Promise((resolve, reject) => {
       const options = {
         hostname: 'httpbin.org',
         port: 443,
         path: '/ip',
         method: 'GET',
-        timeout: 10000,
+        timeout: 15000, // 增加超时时间
+        headers: {
+          'User-Agent': 'WireProxy-HealthCheck/1.0'
+        },
         // 配置SOCKS5代理
-        agent: new (require('socks-proxy-agent').SocksProxyAgent)(`socks5://${this.socks5Host}:${this.socks5Port}`)
+        agent: new SocksProxyAgent(`socks5://${this.socks5Host}:${this.socks5Port}`)
       };
+
+      this.log(`开始获取出口IP，通过代理 ${this.socks5Host}:${this.socks5Port}`, accountId);
 
       const req = https.request(options, (res) => {
         let data = '';
@@ -198,21 +453,36 @@ class WarpManager {
         });
 
         res.on('end', () => {
+          const duration = Date.now() - startTime;
+          this.log(`IP请求完成，耗时: ${duration}ms`, accountId);
+
           try {
             const jsonData = JSON.parse(data);
             const ip = jsonData.origin;
+
+            if (!ip || ip === '127.0.0.1' || ip === 'localhost') {
+              reject(new Error(`获取到无效IP地址: ${ip}`));
+              return;
+            }
+
+            this.log(`成功获取出口IP: ${ip}`, accountId);
             resolve(ip);
           } catch (error) {
+            this.log(`解析IP响应失败: ${error.message}, 响应内容: ${data.substring(0, 200)}`, accountId);
             reject(new Error(`解析IP响应失败: ${error.message}`));
           }
         });
       });
 
       req.on('error', (error) => {
+        const duration = Date.now() - startTime;
+        this.log(`获取IP请求失败，耗时: ${duration}ms, 错误: ${error.message}`, accountId);
         reject(new Error(`获取IP失败: ${error.message}`));
       });
 
       req.on('timeout', () => {
+        const duration = Date.now() - startTime;
+        this.log(`获取IP请求超时，耗时: ${duration}ms`, accountId);
         req.destroy();
         reject(new Error('获取IP请求超时'));
       });
@@ -236,6 +506,92 @@ class WarpManager {
   }
 
   /**
+   * 清理资源
+   */
+  cleanup() {
+    this.stopHealthCheck();
+    this.clearStartupTimeout();
+
+    if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+      try {
+        this.wireproxyProcess.kill('SIGTERM');
+        // 等待进程优雅退出
+        setTimeout(() => {
+          if (!this.wireproxyProcess.killed) {
+            this.wireproxyProcess.kill('SIGKILL');
+          }
+        }, 5000);
+      } catch (error) {
+        // 忽略清理过程中的错误
+      }
+    }
+
+    this.wireproxyProcess = null;
+    this.log('WireProxy管理器资源已清理');
+  }
+
+  /**
+   * 获取性能统计信息
+   */
+  getPerformanceStats(accountId = null) {
+    const stats = {
+      uptime: this.wireproxyProcess ? Date.now() - this.wireproxyProcess.spawnTime : 0,
+      lastHealthCheck: this.lastHealthCheck,
+      healthCheckFailures: this.healthCheckFailures,
+      processPid: this.wireproxyProcess ? this.wireproxyProcess.pid : null,
+      memoryUsage: process.memoryUsage(),
+      timestamp: new Date().toISOString()
+    };
+
+    this.log(`性能统计: ${JSON.stringify(stats, null, 2)}`, accountId);
+    return stats;
+  }
+
+  /**
+   * 获取WireProxy状态信息
+   */
+  getStatus(accountId = null) {
+    const status = {
+      enabled: this.isEnabled(),
+      processRunning: this.wireproxyProcess && !this.wireproxyProcess.killed,
+      processPid: this.wireproxyProcess ? this.wireproxyProcess.pid : null,
+      lastHealthCheck: this.lastHealthCheck,
+      healthCheckFailures: this.healthCheckFailures,
+      socks5Host: this.socks5Host,
+      socks5Port: this.socks5Port,
+      configPath: this.wireproxyConfigPath,
+      binaryPath: this.wireproxyBinary
+    };
+
+    this.log(`WireProxy状态: ${JSON.stringify(status, null, 2)}`, accountId);
+    return status;
+  }
+
+  /**
+   * 强制终止WireProxy进程
+   */
+  async forceKillWireproxy(accountId = null) {
+    try {
+      this.stopHealthCheck();
+
+      if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+        this.log(`强制终止WireProxy进程 (PID: ${this.wireproxyProcess.pid})`, accountId);
+        this.wireproxyProcess.kill('SIGKILL');
+        await this.sleep(1000);
+      }
+
+      // 清理可能残留的进程
+      await this.killExistingWireproxyProcesses(accountId);
+      this.wireproxyProcess = null;
+
+      this.log('WireProxy进程已完全终止', accountId);
+    } catch (error) {
+      this.log(`强制终止WireProxy进程失败: ${error.message}`, accountId);
+      throw error;
+    }
+  }
+
+  /**
    * 执行IP轮换（主要入口函数）
    */
   async rotateIp(accountId = null) {
@@ -244,37 +600,96 @@ class WarpManager {
       return null;
     }
 
+    const startTime = Date.now();
+    let oldIp = null;
+    let newIp = null;
+
     try {
       this.log('开始执行IP轮换...', accountId);
 
       // 获取轮换前的IP
-      const oldIp = await this.getCurrentWarpIp(accountId);
+      oldIp = await this.getCurrentWarpIp(accountId);
       this.log(`轮换前IP: ${oldIp}`, accountId);
+
+      // 停止健康检查，避免干扰重启过程
+      this.stopHealthCheck();
 
       // 重启服务
       await this.restartWarpService(accountId);
 
+      // 等待服务稳定
+      await this.sleep(3000);
+
       // 获取轮换后的IP
-      const newIp = await this.getCurrentWarpIp(accountId);
+      newIp = await this.getCurrentWarpIp(accountId);
       this.log(`轮换后IP: ${newIp}`, accountId);
 
-      if (oldIp !== newIp) {
-        this.log(`IP轮换成功: ${oldIp} -> ${newIp}`, accountId);
+      const duration = Date.now() - startTime;
+      const success = oldIp !== newIp;
+
+      if (success) {
+        this.log(`IP轮换成功: ${oldIp} -> ${newIp} (耗时: ${duration}ms)`, accountId);
       } else {
-        this.log(`IP轮换完成，但IP未改变: ${newIp}`, accountId);
+        this.log(`IP轮换完成，但IP未改变: ${newIp} (耗时: ${duration}ms)`, accountId);
+      }
+
+      // 重新启动健康检查
+      if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+        this.startHealthCheck(accountId);
       }
 
       return {
         oldIp,
         newIp,
-        changed: oldIp !== newIp
+        changed: success,
+        duration,
+        timestamp: new Date().toISOString()
       };
     } catch (error) {
-      this.log(`IP轮换失败: ${error.message}`, accountId);
+      const duration = Date.now() - startTime;
+      this.log(`IP轮换失败 (耗时: ${duration}ms): ${error.message}`, accountId);
+
+      // 即使失败也要尝试重新启动健康检查
+      try {
+        if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+          this.startHealthCheck(accountId);
+        }
+      } catch (healthCheckError) {
+        this.log(`重启健康检查失败: ${healthCheckError.message}`, accountId);
+      }
+
       throw error;
     }
   }
 }
 
+// 创建单例实例
+const warpManagerInstance = new WarpManager();
+
+// 添加进程退出时的清理逻辑
+process.on('SIGINT', () => {
+  console.log('接收到SIGINT信号，正在清理WireProxy资源...');
+  warpManagerInstance.cleanup();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('接收到SIGTERM信号，正在清理WireProxy资源...');
+  warpManagerInstance.cleanup();
+  process.exit(0);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('未捕获的异常:', error);
+  warpManagerInstance.cleanup();
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('未处理的Promise拒绝:', reason);
+  warpManagerInstance.cleanup();
+  process.exit(1);
+});
+
 // 导出单例实例
-module.exports = new WarpManager();
+module.exports = warpManagerInstance;
