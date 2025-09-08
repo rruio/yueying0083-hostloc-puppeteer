@@ -4,13 +4,14 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 // Add stealth plugin
 puppeteer.use(StealthPlugin());
 const { format } = require('date-fns');
-const warpManager = require('./warp-manager');
 
 // 加载环境变量
 const isLocal = process.env.NODE_ENV === 'test';
 if (isLocal) {
   require('dotenv').config();
 }
+
+const warpManager = require('./warp-manager');
 
 function log(message, accountId = null) {
   const timestamp = format(new Date(), 'yyyy-MM-dd HH:mm:ss');
