@@ -266,6 +266,200 @@ describe('LoopController', () => {
       expect(status).toHaveProperty('progress');
     });
   });
+
+  /**
+   * 新增测试用例：验证修复后的abort/listener生命周期管理功能
+   */
+  describe('AbortController重用和监听器管理', () => {
+    test('应该支持AbortController重用（多次调用execute）', async () => {
+      const operation = jest.fn().mockResolvedValue();
+      const controller1 = new LoopController({ maxIterations: 2 });
+      const controller2 = new LoopController({ maxIterations: 2 });
+
+      // 第一次执行
+      await controller1.execute(operation);
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(controller1.currentIteration).toBe(2);
+
+      // 重置并第二次执行
+      controller1.reset();
+      operation.mockClear();
+      await controller1.execute(operation);
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(controller1.currentIteration).toBe(2);
+
+      // 验证两个不同实例可以独立工作
+      await controller2.execute(operation);
+      expect(operation).toHaveBeenCalledTimes(4); // 2 + 2
+    });
+
+    test('应该验证监听器不累积（内存泄漏检查）', async () => {
+      const operation = jest.fn().mockResolvedValue();
+      const controller = new LoopController({ maxIterations: 3 });
+
+      // Spy on AbortController.signal.addEventListener
+      const originalAddEventListener = AbortController.prototype.signal.addEventListener;
+      const addEventListenerSpy = jest.fn().mockImplementation(function(...args) {
+        return originalAddEventListener.apply(this, args);
+      });
+      AbortController.prototype.signal.addEventListener = addEventListenerSpy;
+
+      try {
+        // 第一次执行
+        await controller.execute(operation);
+        const firstCallCount = addEventListenerSpy.mock.calls.length;
+
+        // 重置并第二次执行
+        controller.reset();
+        operation.mockClear();
+        await controller.execute(operation);
+        const secondCallCount = addEventListenerSpy.mock.calls.length;
+
+        // 验证监听器没有累积（第二次执行的监听器数量应该等于第一次）
+        expect(secondCallCount).toBe(firstCallCount);
+      } finally {
+        // 恢复原始方法
+        AbortController.prototype.signal.addEventListener = originalAddEventListener;
+      }
+    });
+
+    test('应该验证{ once: true }监听器行为', async () => {
+      const operation = jest.fn().mockResolvedValue();
+      const controller = new LoopController({ maxIterations: 2 });
+
+      // Spy on AbortController.signal.addEventListener
+      const originalAddEventListener = AbortController.prototype.signal.addEventListener;
+      const addEventListenerSpy = jest.fn().mockImplementation(function(type, listener, options) {
+        // 验证options包含{ once: true }
+        expect(options).toEqual({ once: true });
+        return originalAddEventListener.call(this, type, listener, options);
+      });
+      AbortController.prototype.signal.addEventListener = addEventListenerSpy;
+
+      try {
+        await controller.execute(operation);
+
+        // 验证监听器被调用了
+        expect(addEventListenerSpy).toHaveBeenCalled();
+        // 验证每次迭代都添加了监听器
+        expect(addEventListenerSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        // 恢复原始方法
+        AbortController.prototype.signal.addEventListener = originalAddEventListener;
+      }
+    });
+
+    test('应该验证reset方法正确重置实例状态', () => {
+      const controller = new LoopController({ maxIterations: 5 });
+
+      // 设置一些状态
+      controller.isRunning = true;
+      controller.isPaused = true;
+      controller.currentIteration = 3;
+      controller.abortController = new AbortController();
+
+      // 调用reset
+      controller.reset();
+
+      // 验证状态被正确重置
+      expect(controller.isRunning).toBe(false);
+      expect(controller.isPaused).toBe(false);
+      expect(controller.currentIteration).toBe(0);
+      expect(controller.abortController).toBeNull();
+    });
+
+    test('应该验证stop后的状态正确重置', async () => {
+      const operation = jest.fn().mockImplementation(() => {
+        // 在第二次迭代时停止
+        if (loopController.currentIteration === 2) {
+          loopController.stop();
+        }
+        return Promise.resolve();
+      });
+
+      const controller = new LoopController({ maxIterations: 5 });
+
+      await controller.execute(operation);
+
+      // 验证stop后的状态
+      expect(controller.isRunning).toBe(false);
+      expect(controller.isPaused).toBe(false);
+      expect(controller.currentIteration).toBe(2); // 停止在第2次迭代
+      expect(controller.abortController).toBeDefined(); // AbortController应该存在但已被abort
+      expect(controller.abortController.signal.aborted).toBe(true);
+    });
+
+    test('应该验证AbortController在每次execute时重新初始化', async () => {
+      const operation = jest.fn().mockResolvedValue();
+      const controller = new LoopController({ maxIterations: 1 });
+
+      // 第一次执行
+      await controller.execute(operation);
+      const firstAbortController = controller.abortController;
+
+      // 重置
+      controller.reset();
+
+      // 第二次执行
+      await controller.execute(operation);
+      const secondAbortController = controller.abortController;
+
+      // 验证AbortController实例不同
+      expect(firstAbortController).not.toBe(secondAbortController);
+      expect(firstAbortController).toBeInstanceOf(AbortController);
+      expect(secondAbortController).toBeInstanceOf(AbortController);
+    });
+
+    test('应该验证abort信号正确触发超时处理', async () => {
+      const operation = jest.fn(() => new Promise(resolve => setTimeout(resolve, 100))); // 不会超时
+      const controller = new LoopController({
+        maxIterations: 1,
+        timeoutPerIteration: 50 // 设置较短超时
+      });
+
+      // Spy on clearTimeout
+      const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+
+      try {
+        await expect(controller.execute(operation)).rejects.toThrow('Iteration 1 timeout');
+
+        // 验证clearTimeout被调用（当abort触发时）
+        expect(clearTimeoutSpy).toHaveBeenCalled();
+      } finally {
+        clearTimeoutSpy.mockRestore();
+      }
+    });
+
+    test('应该验证监听器在abort时被正确清理', async () => {
+      const operation = jest.fn().mockResolvedValue();
+      const controller = new LoopController({ maxIterations: 1 });
+
+      // 创建一个mock监听器
+      const mockListener = jest.fn();
+      const originalAddEventListener = AbortController.prototype.signal.addEventListener;
+      const addEventListenerSpy = jest.fn().mockImplementation(function(type, listener, options) {
+        // 存储监听器引用以便后续验证
+        this._testListener = listener;
+        return originalAddEventListener.call(this, type, listener, options);
+      });
+      AbortController.prototype.signal.addEventListener = addEventListenerSpy;
+
+      try {
+        await controller.execute(operation);
+
+        // 验证监听器被添加
+        expect(addEventListenerSpy).toHaveBeenCalled();
+
+        // 手动触发abort
+        controller.abortController.abort();
+
+        // 验证监听器被调用（由于{ once: true }，只会被调用一次）
+        expect(controller.abortController._testListener).toBeDefined();
+      } finally {
+        AbortController.prototype.signal.addEventListener = originalAddEventListener;
+      }
+    });
+  });
 });
 
 /**
