@@ -22,6 +22,10 @@ class WarpManager {
     this.lastHealthCheck = null;
     this.healthCheckFailures = 0;
     this.maxHealthCheckFailures = 3;
+    this.tempConfigPath = null; // 临时配置文件路径
+    this.ipCache = null; // IP缓存
+    this.ipCacheExpiry = null; // IP缓存过期时间
+    this.ipCacheDuration = 5 * 60 * 1000; // IP缓存5分钟
   }
 
   /**
@@ -92,18 +96,23 @@ class WarpManager {
 
       if (pids.length > 0) {
         this.log(`发现 ${pids.length} 个wireproxy进程，正在终止...`, accountId);
-        // 优雅终止
-        await this.execPromise(`kill ${pids.join(' ')}`);
-        // 等待5秒，如果还没终止则强制终止
-        await this.sleep(5000);
-        await this.execPromise(`kill -9 ${pids.join(' ')} || true`);
-        this.log('wireproxy进程已终止', accountId);
+        try {
+          // 优雅终止
+          await this.execPromise(`kill ${pids.join(' ')}`);
+          // 等待5秒，如果还没终止则强制终止
+          await this.sleep(5000);
+          await this.execPromise(`kill -9 ${pids.join(' ')} || true`);
+          this.log('wireproxy进程已终止', accountId);
+        } catch (killError) {
+          this.log(`终止wireproxy进程失败: ${killError.message}`, accountId);
+          // 继续执行，不抛出错误
+        }
       } else {
         this.log('未发现运行中的wireproxy进程', accountId);
       }
     } catch (error) {
-      this.log(`终止wireproxy进程时出错: ${error.message}`, accountId);
-      // 不抛出错误，继续执行
+      this.log(`查找wireproxy进程时出错: ${error.message}`, accountId);
+      // 不抛出错误，继续执行，但记录更详细的错误信息
     }
   }
 
@@ -136,24 +145,59 @@ class WarpManager {
    */
   async startWireproxy(accountId = null) {
     return new Promise(async (resolve, reject) => {
+      let portCheckInterval = null;
+      let startupTimeout = null;
+
       try {
         this.log(`启动WireProxy: ${this.wireproxyBinary} -c ${this.wireproxyConfigPath}`, accountId);
 
         // 检查配置文件是否存在
-        const fs = require('fs');
-        if (!fs.existsSync(this.wireproxyConfigPath)) {
+        const fs = require('fs').promises;
+        const fsSync = require('fs');
+        const path = require('path');
+
+        if (!fsSync.existsSync(this.wireproxyConfigPath)) {
           throw new Error(`WireProxy配置文件不存在: ${this.wireproxyConfigPath}`);
         }
 
-        // 检查WireProxy二进制文件是否存在
-        try {
-          await this.execPromise(`which ${this.wireproxyBinary}`);
-        } catch (error) {
-          throw new Error(`WireProxy二进制文件未找到: ${this.wireproxyBinary}`);
+        // 检查WireProxy二进制文件是否存在，并防止命令注入
+        const binaryPath = this.wireproxyBinary;
+        if (!binaryPath || typeof binaryPath !== 'string' || binaryPath.trim() === '') {
+          throw new Error('WireProxy二进制文件路径无效');
         }
 
-        // 启动WireProxy进程
-        this.wireproxyProcess = spawn(this.wireproxyBinary, ['-c', this.wireproxyConfigPath], {
+        // 验证路径不包含危险字符
+        if (/[;&|`$()<>]/.test(binaryPath)) {
+          throw new Error('WireProxy二进制文件路径包含危险字符');
+        }
+
+        try {
+          await this.execPromise(`which "${binaryPath}"`);
+        } catch (error) {
+          throw new Error(`WireProxy二进制文件未找到: ${binaryPath}`);
+        }
+
+        // 异步读取并处理配置文件，进行环境变量替换
+        let configContent = await fs.readFile(this.wireproxyConfigPath, 'utf8');
+
+        // 检查并替换环境变量
+        const warpPrivateKey = process.env.WARP_PRIVATE_KEY;
+        if (!warpPrivateKey) {
+          throw new Error('环境变量 WARP_PRIVATE_KEY 未设置');
+        }
+
+        // 安全地替换环境变量，支持特殊字符转义
+        configContent = configContent.replace(/\$\{WARP_PRIVATE_KEY\}/g, warpPrivateKey.replace(/[\\$]/g, '\\$&'));
+
+        // 创建临时配置文件，设置安全权限
+        const tempDir = require('os').tmpdir();
+        this.tempConfigPath = path.join(tempDir, `wireproxy-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.conf`);
+        await fs.writeFile(this.tempConfigPath, configContent, { mode: 0o600, encoding: 'utf8' });
+
+        this.log(`已创建临时配置文件: ${this.tempConfigPath}`, accountId);
+
+        // 启动WireProxy进程，使用临时配置文件
+        this.wireproxyProcess = spawn(this.wireproxyBinary, ['-c', this.tempConfigPath], {
           detached: true,
           stdio: ['ignore', 'pipe', 'pipe']
         });
@@ -164,14 +208,16 @@ class WarpManager {
         this.log(`WireProxy进程已启动，PID: ${this.wireproxyProcess.pid}`, accountId);
 
         // 设置启动超时
-        this.startupTimeout = setTimeout(() => {
+        startupTimeout = setTimeout(() => {
           this.log('WireProxy启动超时，正在终止进程...', accountId);
-          this.wireproxyProcess.kill('SIGTERM');
-          setTimeout(() => {
-            if (!this.wireproxyProcess.killed) {
-              this.wireproxyProcess.kill('SIGKILL');
-            }
-          }, 5000);
+          if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+            this.wireproxyProcess.kill('SIGTERM');
+            setTimeout(() => {
+              if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
+                this.wireproxyProcess.kill('SIGKILL');
+              }
+            }, 5000);
+          }
           reject(new Error('WireProxy启动超时'));
         }, 30000);
 
@@ -180,7 +226,10 @@ class WarpManager {
         // 监听stdout
         this.wireproxyProcess.stdout.on('data', (data) => {
           const output = data.toString();
-          this.log(`WireProxy输出: ${output.trim()}`, accountId);
+          // 避免记录可能包含敏感信息的完整输出，只记录状态信息
+          if (output.includes('SOCKS5') || output.includes('listening') || output.includes('ready')) {
+            this.log('WireProxy启动状态信息已接收', accountId);
+          }
 
           // 检查启动成功标志
           if (!startupDetected && (output.includes('SOCKS5') || output.includes('listening') || output.includes('ready'))) {
@@ -192,7 +241,10 @@ class WarpManager {
         // 监听stderr
         this.wireproxyProcess.stderr.on('data', (data) => {
           const error = data.toString();
-          this.log(`WireProxy错误: ${error.trim()}`, accountId);
+          // 避免记录可能包含敏感信息的错误详情，只记录错误类型
+          if (error.includes('error') || error.includes('Error') || error.includes('failed')) {
+            this.log('WireProxy进程报告错误', accountId);
+          }
         });
 
         // 监听进程错误
@@ -212,14 +264,18 @@ class WarpManager {
         });
 
         // 定期检查端口是否监听
-        const portCheckInterval = setInterval(async () => {
+        portCheckInterval = setInterval(async () => {
           if (await this.checkPortListening(this.socks5Host, parseInt(this.socks5Port))) {
             clearInterval(portCheckInterval);
+            portCheckInterval = null;
             this.clearStartupTimeout();
             this.log(`WireProxy端口 ${this.socks5Host}:${this.socks5Port} 已开始监听`, accountId);
 
             // 启动健康检查
             this.startHealthCheck(accountId);
+
+            // 注意：成功启动后不清理临时文件，因为WireProxy进程仍在使用它
+            // 临时文件将在进程退出时或cleanup()方法中清理
 
             resolve();
           }
@@ -228,7 +284,10 @@ class WarpManager {
         // 如果10秒后仍未检测到端口监听，则认为启动失败
         setTimeout(() => {
           if (!this.wireproxyProcess.killed) {
-            clearInterval(portCheckInterval);
+            if (portCheckInterval) {
+              clearInterval(portCheckInterval);
+              portCheckInterval = null;
+            }
             this.clearStartupTimeout();
             this.log('WireProxy端口监听检测超时', accountId);
             reject(new Error('WireProxy端口监听检测超时'));
@@ -239,6 +298,18 @@ class WarpManager {
         this.clearStartupTimeout();
         this.log(`启动WireProxy失败: ${error.message}`, accountId);
         reject(error);
+      } finally {
+        // 确保资源清理
+        if (portCheckInterval) {
+          clearInterval(portCheckInterval);
+        }
+        if (startupTimeout) {
+          clearTimeout(startupTimeout);
+        }
+        // 清理临时文件（如果启动失败）
+        if (this.tempConfigPath && !this.wireproxyProcess) {
+          this.cleanupTempConfig(accountId);
+        }
       }
     });
   }
@@ -424,10 +495,18 @@ class WarpManager {
 
   /**
    * 获取当前出口IP
-   * 通过httpbin.org/ip获取当前IP地址
+   * 通过httpbin.org/ip获取当前IP地址，支持缓存机制
    */
   async getCurrentWarpIp(accountId = null) {
-    const startTime = Date.now();
+    const now = Date.now();
+
+    // 检查缓存是否有效
+    if (this.ipCache && this.ipCacheExpiry && now < this.ipCacheExpiry) {
+      this.log(`使用缓存的IP地址: ${this.ipCache}`, accountId);
+      return this.ipCache;
+    }
+
+    const startTime = now;
 
     return new Promise((resolve, reject) => {
       const options = {
@@ -465,10 +544,14 @@ class WarpManager {
               return;
             }
 
+            // 更新缓存
+            this.ipCache = ip;
+            this.ipCacheExpiry = Date.now() + this.ipCacheDuration;
+
             this.log(`成功获取出口IP: ${ip}`, accountId);
             resolve(ip);
           } catch (error) {
-            this.log(`解析IP响应失败: ${error.message}, 响应内容: ${data.substring(0, 200)}`, accountId);
+            this.log(`解析IP响应失败: ${error.message}`, accountId);
             reject(new Error(`解析IP响应失败: ${error.message}`));
           }
         });
@@ -506,11 +589,44 @@ class WarpManager {
   }
 
   /**
+   * 清理临时配置文件
+   */
+  cleanupTempConfig(accountId = null) {
+    if (this.tempConfigPath) {
+      const fs = require('fs');
+      if (fs.existsSync(this.tempConfigPath)) {
+        try {
+          fs.unlinkSync(this.tempConfigPath);
+          this.log(`已清理临时配置文件: ${this.tempConfigPath}`, accountId);
+        } catch (error) {
+          this.log(`清理临时文件失败: ${error.message}`, accountId);
+        }
+      }
+      this.tempConfigPath = null;
+    }
+  }
+
+  /**
+   * 清理IP缓存
+   */
+  clearIpCache() {
+    this.ipCache = null;
+    this.ipCacheExpiry = null;
+    this.log('IP缓存已清理');
+  }
+
+  /**
    * 清理资源
    */
   cleanup() {
     this.stopHealthCheck();
     this.clearStartupTimeout();
+
+    // 清理临时配置文件
+    this.cleanupTempConfig();
+
+    // 清理IP缓存
+    this.clearIpCache();
 
     if (this.wireproxyProcess && !this.wireproxyProcess.killed) {
       try {
@@ -606,6 +722,9 @@ class WarpManager {
 
     try {
       this.log('开始执行IP轮换...', accountId);
+
+      // 清理IP缓存，确保获取最新的IP
+      this.clearIpCache();
 
       // 获取轮换前的IP
       oldIp = await this.getCurrentWarpIp(accountId);
