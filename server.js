@@ -1,11 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
-const { format } = require('date-fns');
+const { format, addDays } = require('date-fns');
 const schedule = require('node-schedule');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { Server } = require('socket.io');
+const warpManager = require('./warp-manager');
 
 // Add stealth plugin
 puppeteer.use(StealthPlugin());
@@ -40,19 +41,150 @@ app.use(session({
 }));
 
 // 日志函数
-function log(message) {
+function log(message, accountId = null) {
   const timestamp = format(new Date(), 'yyyy-MM-dd HH:mm:ss');
-  const logMessage = `[${timestamp}] ${message}`;
+  const accountPrefix = accountId ? `[账号${accountId}] ` : '';
+  const logMessage = `[${timestamp}] ${accountPrefix}${message}`;
   console.log(logMessage);
   if (global.io) {
     global.io.emit('log', logMessage);
   }
 }
 
+// 计算环境变量哈希值的函数
+function calculateEnvHash() {
+  const crypto = require('crypto');
+  const accountsEnv = process.env.HOSTLOC_ACCOUNTS || '';
+  const username = process.env.HOSTLOC_USERNAME || '';
+  const password = process.env.HOSTLOC_PASSWORD || '';
+  const envString = accountsEnv + username + password;
+  return crypto.createHash('md5').update(envString).digest('hex');
+}
+
+// 账号管理函数（带缓存机制）
+function loadAccounts(forceReload = false) {
+  const currentEnvHash = calculateEnvHash();
+
+  // 如果不是强制重新加载且缓存有效，直接返回缓存的账号
+  if (!forceReload && accountsCache.envHash === currentEnvHash && accountsCache.accounts.length > 0) {
+    accounts = accountsCache.accounts;
+    return accounts;
+  }
+
+  // 重新加载账号配置
+  const accountsEnv = process.env.HOSTLOC_ACCOUNTS;
+  accounts = [];
+
+  if (accountsEnv) {
+    try {
+      accounts = JSON.parse(accountsEnv);
+      log(`从环境变量加载了${accounts.length}个账号配置`);
+    } catch (error) {
+      log(`解析HOSTLOC_ACCOUNTS环境变量失败: ${error.message}`);
+    }
+  }
+
+  // 如果没有配置多个账号，尝试使用单个账号配置（向后兼容）
+  if (accounts.length === 0) {
+    const username = process.env.HOSTLOC_USERNAME;
+    const password = process.env.HOSTLOC_PASSWORD;
+
+    if (username && password) {
+      accounts.push({ username, password });
+      log('使用单个账号配置（向后兼容）');
+    }
+  }
+
+  // 更新缓存
+  accountsCache.accounts = accounts;
+  accountsCache.envHash = currentEnvHash;
+  accountsCache.lastLoadTime = new Date();
+
+  return accounts;
+}
+
+// 计算下一个账号运行的预计时间
+function calculateNextAccountRunTime() {
+  // 强制重新加载账号配置（以防环境变量有更新）
+  loadAccounts(true);
+
+  if (accounts.length === 0) {
+    return null; // 没有账号
+  }
+
+  // 过滤出今天还没执行过的账号
+  const availableAccounts = accounts
+    .map((account, index) => ({ ...account, id: index + 1 }))
+    .filter(account => isAccountAvailableToday(account.id));
+
+  if (availableAccounts.length > 0) {
+    // 有可用账号，计算随机延迟时间（5-30分钟）
+    const randomDelayMinutes = Math.floor(Math.random() * (30 - 5 + 1)) + 5;
+    const randomDelayMs = randomDelayMinutes * 60 * 1000;
+    return new Date(Date.now() + randomDelayMs);
+  } else {
+    // 所有账号都执行过了，返回明天定时任务的时间
+    if (scheduleConfig.enabled) {
+      // 计算明天早上8点（假设 cron 是 '0 8 * * *'）
+      const tomorrow = addDays(new Date(), 1);
+      tomorrow.setHours(8, 0, 0, 0);
+      return tomorrow;
+    } else {
+      // 定时任务禁用，返回明天当前时间
+      return addDays(new Date(), 1);
+    }
+  }
+}
+
+function isAccountAvailableToday(accountId) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  const lastRun = accountLastRun[accountId];
+  return lastRun !== today;
+}
+
+function getRandomAvailableAccount() {
+  // 强制重新加载账号配置（以防环境变量有更新）
+  loadAccounts(true);
+
+  if (accounts.length === 0) {
+    throw new Error('未配置任何账号');
+  }
+
+  // 过滤出今天还没执行过的账号
+  const availableAccounts = accounts
+    .map((account, index) => ({ ...account, id: index + 1 }))
+    .filter(account => isAccountAvailableToday(account.id));
+
+  if (availableAccounts.length === 0) {
+    throw new Error('今天所有账号都已执行过任务');
+  }
+
+  // 随机选择一个可用账号
+  const randomIndex = Math.floor(Math.random() * availableAccounts.length);
+  return availableAccounts[randomIndex];
+}
+
+function updateAccountLastRun(accountId) {
+  const today = format(new Date(), 'yyyy-MM-dd');
+  accountLastRun[accountId] = today;
+  log(`更新账号${accountId}最后执行日期为: ${today}`, accountId);
+}
+
 // 全局状态
 let isRunning = false;
 let lastRunTime = null;
 let currentStatus = 'idle';
+
+// 账号相关状态
+let accounts = [];
+let accountLastRun = {}; // 记录每个账号的最后执行日期，格式: {accountId: 'YYYY-MM-DD'}
+
+// 账号配置缓存
+let accountsCache = {
+  accounts: [],
+  envHash: null, // 环境变量的哈希值，用于检测变化
+  lastLoadTime: null
+};
 
 // 定时任务配置
 let scheduleConfig = {
@@ -64,22 +196,37 @@ let scheduledJob = null;
 
 // 提取Puppeteer任务逻辑为函数
 async function runPuppeteerTask() {
+  let selectedAccount = null;
+  let accountId = null;
+
   try {
     isRunning = true;
     currentStatus = 'running';
-    log('开始执行Puppeteer任务...');
 
-    // 从环境变量获取登录凭证
-    const username = process.env.HOSTLOC_USERNAME;
-    const password = process.env.HOSTLOC_PASSWORD;
+    // 随机选择可用账号
+    selectedAccount = getRandomAvailableAccount();
+    accountId = selectedAccount.id;
+    const { username, password } = selectedAccount;
 
-    if (!username || !password) {
-      throw new Error('请设置HOSTLOC_USERNAME和HOSTLOC_PASSWORD环境变量');
+    log('开始执行Puppeteer任务...', accountId);
+    log(`随机选择账号: ${username}`, accountId);
+    log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`, accountId);
+
+    // 执行IP轮换（如果启用）
+    if (warpManager.isEnabled()) {
+      try {
+        log('开始IP轮换...', accountId);
+        const rotationResult = await warpManager.rotateIp(accountId);
+        if (rotationResult) {
+          log(`IP轮换完成: ${rotationResult.oldIp} -> ${rotationResult.newIp}`, accountId);
+        }
+      } catch (error) {
+        log(`IP轮换失败，但继续执行签到: ${error.message}`, accountId);
+        // IP轮换失败不影响签到流程，继续执行
+      }
     }
 
-    log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`);
-
-    log('启动浏览器...');
+    log('启动浏览器...', accountId);
 
     // 检查WARP代理配置
     const warpEnabled = process.env.WARP_ENABLED === 'true';
@@ -95,9 +242,9 @@ async function runPuppeteerTask() {
     // 如果启用WARP代理，添加代理参数
     if (warpEnabled && warpSocks5Host && warpSocks5Port) {
       launchArgs.push(`--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`);
-      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`);
+      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`, accountId);
     } else if (warpEnabled) {
-      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT');
+      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT', accountId);
     }
 
     const browser = await puppeteer.launch({
@@ -108,20 +255,20 @@ async function runPuppeteerTask() {
     const page = await browser.newPage();
 
     // 访问hostloc并登录
-    log('访问hostloc论坛...');
+    log('访问hostloc论坛...', accountId);
     await page.goto('https://hostloc.com/forum-45-1.html');
 
-    log('输入用户名和密码...');
+    log('输入用户名和密码...', accountId);
     await page.type('#ls_username', username);
     await page.type('#ls_password', password);
-    log('提交登录表单...');
+    log('提交登录表单...', accountId);
     await page.click('button[type="submit"]');
 
     // 等待登录完成并验证
     await page.waitForNavigation();
 
     // 检查用户空间链接是否存在以确认登录成功
-    log('等待登录成功...');
+    log('等待登录成功...', accountId);
     const loggedIn = await page.evaluate((username) => {
       return !!document.querySelector(
         `a[href^="space-uid-"][title="访问我的空间"]`
@@ -132,17 +279,17 @@ async function runPuppeteerTask() {
       throw new Error('登录失败，未找到用户空间链接');
     }
 
-    log('登录成功!');
+    log('登录成功!', accountId);
     await page.evaluate(() => console.log('登录成功'));
 
-    log('开始随机访问20个用户空间...');
+    log('开始随机访问20个用户空间...', accountId);
     for (let i = 0; i < 20; i++) {
       const randomUid = Math.floor(Math.random() * 31210);
-      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`);
+      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`, accountId);
       try {
         await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
       } catch (error) {
-        log(`访问用户空间失败: ${error.message}`);
+        log(`访问用户空间失败: ${error.message}`, accountId);
       }
       await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
     }
@@ -150,10 +297,193 @@ async function runPuppeteerTask() {
     await browser.close();
     lastRunTime = new Date();
     currentStatus = 'completed';
-    log('任务完成');
+
+    // 更新账号最后执行记录
+    updateAccountLastRun(accountId);
+
+    log('任务完成', accountId);
+
+    // 检查是否还有其他账号需要执行（强制重新加载以获取最新配置）
+    loadAccounts(true);
+    const availableAccounts = accounts
+      .map((account, index) => ({ ...account, id: index + 1 }))
+      .filter(account => isAccountAvailableToday(account.id));
+
+    if (availableAccounts.length > 0) {
+      // 生成随机延迟时间（5-30分钟）
+      const randomDelayMinutes = Math.floor(Math.random() * (30 - 5 + 1)) + 5;
+      const randomDelayMs = randomDelayMinutes * 60 * 1000;
+      const nextRunTime = new Date(Date.now() + randomDelayMs);
+
+      log(`发现${availableAccounts.length}个可用账号，将在${randomDelayMinutes}分钟后自动执行下一个账号`, accountId);
+      log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`, accountId);
+
+      // 设置定时器自动执行下一个账号
+      setTimeout(async () => {
+        if (!isRunning) {
+          try {
+            await runPuppeteerTask();
+          } catch (error) {
+            log(`自动执行下一个账号失败: ${error.message}`);
+          }
+        } else {
+          log('定时器触发时任务正在运行中，跳过自动执行');
+        }
+      }, randomDelayMs);
+    } else {
+      log('今天所有账号都已执行完成', accountId);
+    }
   } catch (error) {
     currentStatus = 'error';
-    log(`任务执行出错: ${error.message}`);
+    log(`任务执行出错: ${error.message}`, accountId);
+    throw error;
+  } finally {
+    isRunning = false;
+  }
+}
+
+// 跳过随机延时的Puppeteer任务逻辑
+async function runPuppeteerTaskSkipDelay() {
+  let selectedAccount = null;
+  let accountId = null;
+
+  try {
+    isRunning = true;
+    currentStatus = 'running';
+
+    // 随机选择可用账号
+    selectedAccount = getRandomAvailableAccount();
+    accountId = selectedAccount.id;
+    const { username, password } = selectedAccount;
+
+    log('开始执行Puppeteer任务（跳过延时）...', accountId);
+    log(`随机选择账号: ${username}`, accountId);
+    log(`运行模式: ${isLocal ? '本地测试' : '生产环境'}`, accountId);
+
+    // 执行IP轮换（如果启用）
+    if (warpManager.isEnabled()) {
+      try {
+        log('开始IP轮换...', accountId);
+        const rotationResult = await warpManager.rotateIp(accountId);
+        if (rotationResult) {
+          log(`IP轮换完成: ${rotationResult.oldIp} -> ${rotationResult.newIp}`, accountId);
+        }
+      } catch (error) {
+        log(`IP轮换失败，但继续执行签到: ${error.message}`, accountId);
+        // IP轮换失败不影响签到流程，继续执行
+      }
+    }
+
+    log('启动浏览器...', accountId);
+
+    // 检查WARP代理配置
+    const warpEnabled = process.env.WARP_ENABLED === 'true';
+    const warpSocks5Host = process.env.WARP_SOCKS5_HOST;
+    const warpSocks5Port = process.env.WARP_SOCKS5_PORT;
+
+    const launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ];
+
+    // 如果启用WARP代理，添加代理参数
+    if (warpEnabled && warpSocks5Host && warpSocks5Port) {
+      launchArgs.push(`--proxy-server=socks5://${warpSocks5Host}:${warpSocks5Port}`);
+      log(`启用WARP代理: socks5://${warpSocks5Host}:${warpSocks5Port}`, accountId);
+    } else if (warpEnabled) {
+      log('警告: WARP_ENABLED为true，但未设置WARP_SOCKS5_HOST或WARP_SOCKS5_PORT', accountId);
+    }
+
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: launchArgs,
+      ...(isLocal ? { slowMo: 50 } : {}),
+    });
+    const page = await browser.newPage();
+
+    // 访问hostloc并登录
+    log('访问hostloc论坛...', accountId);
+    await page.goto('https://hostloc.com/forum-45-1.html');
+
+    log('输入用户名和密码...', accountId);
+    await page.type('#ls_username', username);
+    await page.type('#ls_password', password);
+    log('提交登录表单...', accountId);
+    await page.click('button[type="submit"]');
+
+    // 等待登录完成并验证
+    await page.waitForNavigation();
+
+    // 检查用户空间链接是否存在以确认登录成功
+    log('等待登录成功...', accountId);
+    const loggedIn = await page.evaluate((username) => {
+      return !!document.querySelector(
+        `a[href^="space-uid-"][title="访问我的空间"]`
+      );
+    }, username);
+
+    if (!loggedIn) {
+      throw new Error('登录失败，未找到用户空间链接');
+    }
+
+    log('登录成功!', accountId);
+    await page.evaluate(() => console.log('登录成功'));
+
+    log('开始随机访问20个用户空间...', accountId);
+    for (let i = 0; i < 20; i++) {
+      const randomUid = Math.floor(Math.random() * 31210);
+      log(`访问用户空间: https://www.hostloc.com/space-uid-${randomUid}.html`, accountId);
+      try {
+        await page.goto(`https://www.hostloc.com/space-uid-${randomUid}.html`);
+      } catch (error) {
+        log(`访问用户空间失败: ${error.message}`, accountId);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
+    }
+
+    await browser.close();
+    lastRunTime = new Date();
+    currentStatus = 'completed';
+
+    // 更新账号最后执行记录
+    updateAccountLastRun(accountId);
+
+    log('任务完成（跳过延时模式）', accountId);
+
+    // 检查是否还有其他账号需要执行（强制重新加载以获取最新配置）
+    loadAccounts(true);
+    const availableAccounts = accounts
+      .map((account, index) => ({ ...account, id: index + 1 }))
+      .filter(account => isAccountAvailableToday(account.id));
+
+    if (availableAccounts.length > 0) {
+      // 即使是跳过延时模式，下次执行仍然使用正常的随机延时逻辑
+      const randomDelayMinutes = Math.floor(Math.random() * (30 - 5 + 1)) + 5;
+      const randomDelayMs = randomDelayMinutes * 60 * 1000;
+      const nextRunTime = new Date(Date.now() + randomDelayMs);
+
+      log(`发现${availableAccounts.length}个可用账号，将在${randomDelayMinutes}分钟后自动执行下一个账号`, accountId);
+      log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`, accountId);
+
+      // 设置定时器自动执行下一个账号
+      setTimeout(async () => {
+        if (!isRunning) {
+          try {
+            await runPuppeteerTask();
+          } catch (error) {
+            log(`自动执行下一个账号失败: ${error.message}`);
+          }
+        } else {
+          log('定时器触发时任务正在运行中，跳过自动执行');
+        }
+      }, randomDelayMs);
+    } else {
+      log('今天所有账号都已执行完成', accountId);
+    }
+  } catch (error) {
+    currentStatus = 'error';
+    log(`任务执行出错: ${error.message}`, accountId);
     throw error;
   } finally {
     isRunning = false;
@@ -306,8 +636,21 @@ app.get('/', (req, res) => {
             <div style="text-align: right; margin-bottom: 20px;">
                 <button onclick="logout()" style="background-color: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">登出</button>
             </div>
+
+            <h2 style="margin-top: 30px;">账号信息</h2>
+            <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+                <div style="margin-bottom: 15px;">
+                    <strong id="accountCount">当前配置账号数量：加载中...</strong>
+                    <button onclick="loadAccountInfo()" style="margin-left: 15px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">刷新账号信息</button>
+                </div>
+                <div id="accountList" style="margin-top: 10px;">
+                    <div style="color: #666;">正在加载账号信息...</div>
+                </div>
+            </div>
+
             <div id="status" class="status idle">状态: 空闲</div>
             <button id="runBtn" class="run-btn" onclick="runTask()">运行任务</button>
+            <button id="runNextBtn" class="run-btn" onclick="runNextAccount()" style="background-color: #ffc107; color: #212529;">立即运行下一个账号</button>
             <button onclick="checkStatus()">刷新状态</button>
             <button onclick="testWarpIp()" style="background-color: #17a2b8; color: white; border: none; padding: 10px 20px; margin: 5px; cursor: pointer;">测试WARP出口IP</button>
             <div id="lastRun">最后运行时间: 从未运行</div>
@@ -341,6 +684,7 @@ app.get('/', (req, res) => {
                 statusEl.textContent = '状态: ' + getStatusText(data.status);
 
                 document.getElementById('runBtn').disabled = data.isRunning;
+                document.getElementById('runNextBtn').disabled = data.isRunning || !data.hasAvailableAccounts;
                 document.getElementById('lastRun').textContent = '最后运行时间: ' + (data.lastRunTime || '从未运行');
             }
 
@@ -369,6 +713,21 @@ app.get('/', (req, res) => {
                 }
             }
 
+            async function runNextAccount() {
+                try {
+                    const response = await fetch('/run-next-account', { method: 'POST' });
+                    const result = await response.json();
+                    if (result.success) {
+                        alert('下一个账号任务已启动');
+                        checkStatus();
+                    } else {
+                        alert('启动失败: ' + result.message);
+                    }
+                } catch (error) {
+                    alert('请求失败: ' + error.message);
+                }
+            }
+
             async function checkStatus() {
                 try {
                     const response = await fetch('/status');
@@ -376,6 +735,18 @@ app.get('/', (req, res) => {
                     updateStatus(data);
                 } catch (error) {
                     console.error('获取状态失败:', error);
+                }
+            }
+
+            // 检查是否有可用账号
+            async function checkAvailableAccounts() {
+                try {
+                    const response = await fetch('/available-accounts');
+                    const data = await response.json();
+                    return data.hasAvailableAccounts || false;
+                } catch (error) {
+                    console.error('检查可用账号失败:', error);
+                    return false;
                 }
             }
 
@@ -491,10 +862,42 @@ app.get('/', (req, res) => {
               logsDiv.scrollTop = logsDiv.scrollHeight; // 自动滚动到底部
             });
 
+            // 账号信息相关函数
+            async function loadAccountInfo() {
+                try {
+                    const response = await fetch('/accounts');
+                    const data = await response.json();
+
+                    if (data.success) {
+                        document.getElementById('accountCount').textContent = '当前配置账号数量：' + data.count + '个';
+
+                        const accountListDiv = document.getElementById('accountList');
+                        if (data.accounts.length > 0) {
+                            let html = '<ul style="margin: 0; padding-left: 20px;">';
+                            data.accounts.forEach(account => {
+                                html += '<li>账号 ' + account.id + ': ' + account.username + '</li>';
+                            });
+                            html += '</ul>';
+                            accountListDiv.innerHTML = html;
+                        } else {
+                            accountListDiv.innerHTML = '<div style="color: #dc3545;">未配置任何账号</div>';
+                        }
+                    } else {
+                        document.getElementById('accountCount').textContent = '获取账号信息失败';
+                        document.getElementById('accountList').innerHTML = '<div style="color: #dc3545;">无法加载账号信息</div>';
+                    }
+                } catch (error) {
+                    console.error('加载账号信息失败:', error);
+                    document.getElementById('accountCount').textContent = '获取账号信息失败';
+                    document.getElementById('accountList').innerHTML = '<div style="color: #dc3545;">网络错误，无法加载账号信息</div>';
+                }
+            }
+
             // 定期检查状态
             setInterval(checkStatus, 5000);
             checkStatus(); // 初始检查
             loadScheduleConfig(); // 加载定时配置
+            loadAccountInfo(); // 加载账号信息
         </script>
     </body>
     </html>
@@ -558,12 +961,44 @@ app.post('/run', requireAuth, async (req, res) => {
   }
 });
 
+// POST /run-next-account - 立即运行下一个账号（跳过随机延时）
+app.post('/run-next-account', requireAuth, async (req, res) => {
+  if (isRunning) {
+    return res.status(409).json({ success: false, message: '任务正在运行中' });
+  }
+
+  try {
+    // 检查是否有可用账号（强制重新加载以获取最新配置）
+    loadAccounts(true);
+    const availableAccounts = accounts
+      .map((account, index) => ({ ...account, id: index + 1 }))
+      .filter(account => isAccountAvailableToday(account.id));
+
+    if (availableAccounts.length === 0) {
+      return res.status(400).json({ success: false, message: '今天没有可用的账号' });
+    }
+
+    // 异步执行任务，跳过随机延时
+    runPuppeteerTaskSkipDelay();
+    res.json({ success: true, message: '下一个账号任务已启动' });
+  } catch (error) {
+    log(`启动下一个账号任务失败: ${error.message}`);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // GET /status - 获取当前状态
 app.get('/status', requireAuth, (req, res) => {
+  // 使用缓存的账号配置，避免每次都重新加载
+  const availableAccounts = accounts
+    .map((account, index) => ({ ...account, id: index + 1 }))
+    .filter(account => isAccountAvailableToday(account.id));
+
   res.json({
     status: currentStatus,
     isRunning,
-    lastRunTime: lastRunTime ? format(lastRunTime, 'yyyy-MM-dd HH:mm:ss') : null
+    lastRunTime: lastRunTime ? format(lastRunTime, 'yyyy-MM-dd HH:mm:ss') : null,
+    hasAvailableAccounts: availableAccounts.length > 0
   });
 });
 
@@ -679,9 +1114,97 @@ app.post('/schedule', requireAuth, (req, res) => {
   }
 });
 
+// GET /accounts - 获取账号信息
+app.get('/accounts', requireAuth, (req, res) => {
+  try {
+    // 从环境变量获取多个账号配置
+    const accountsEnv = process.env.HOSTLOC_ACCOUNTS;
+    let accounts = [];
+
+    if (accountsEnv) {
+      try {
+        accounts = JSON.parse(accountsEnv);
+        log(`从环境变量加载了${accounts.length}个账号配置`);
+      } catch (error) {
+        log(`解析HOSTLOC_ACCOUNTS环境变量失败: ${error.message}`);
+      }
+    }
+
+    // 如果没有配置多个账号，尝试使用单个账号配置（向后兼容）
+    if (accounts.length === 0) {
+      const username = process.env.HOSTLOC_USERNAME;
+      const password = process.env.HOSTLOC_PASSWORD;
+
+      if (username && password) {
+        accounts.push({ username, password });
+        log('使用单个账号配置（向后兼容）');
+      }
+    }
+
+    // 只返回用户名，不包含密码
+    const accountInfo = accounts.map((account, index) => ({
+      id: index + 1,
+      username: account.username
+    }));
+
+    res.json({
+      success: true,
+      count: accounts.length,
+      accounts: accountInfo
+    });
+  } catch (error) {
+    log(`获取账号信息失败: ${error.message}`);
+    res.status(500).json({ success: false, message: '获取账号信息失败' });
+  }
+});
+
+// GET /available-accounts - 检查是否有可用账号
+app.get('/available-accounts', requireAuth, (req, res) => {
+  try {
+    // 使用缓存的账号配置，避免每次都重新加载
+    if (accounts.length === 0) {
+      return res.json({
+        success: true,
+        hasAvailableAccounts: false,
+        message: '未配置任何账号'
+      });
+    }
+
+    // 过滤出今天还没执行过的账号
+    const availableAccounts = accounts
+      .map((account, index) => ({ ...account, id: index + 1 }))
+      .filter(account => isAccountAvailableToday(account.id));
+
+    res.json({
+      success: true,
+      hasAvailableAccounts: availableAccounts.length > 0,
+      availableCount: availableAccounts.length,
+      totalCount: accounts.length
+    });
+  } catch (error) {
+    log(`检查可用账号失败: ${error.message}`);
+    res.status(500).json({ success: false, message: '检查可用账号失败' });
+  }
+});
+
 // 启动服务器
 const server = app.listen(PORT, () => {
   log(`服务器运行在端口 ${PORT}`);
+
+  // 初始化账号配置（强制加载一次以填充缓存）
+  loadAccounts(true);
+  log(`初始化完成，已加载${accounts.length}个账号配置`);
+
+  // 初始化定时任务
+  scheduleTask();
+
+  // 显示下一个账号运行的预计时间
+  const nextRunTime = calculateNextAccountRunTime();
+  if (nextRunTime) {
+    log(`下一个账号运行预计时间: ${format(nextRunTime, 'yyyy-MM-dd HH:mm:ss')}`);
+  } else {
+    log('没有配置账号，无法计算下次运行时间');
+  }
 });
 
 const io = new Server(server);

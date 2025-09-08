@@ -51,7 +51,8 @@ Hostloc的签到就是要访问20个用户的空间，这个运行逻辑不能�
 - `ADMIN_PASSWORD`: 管理员密码
 - `SESSION_SECRET`: 随机生成的密钥
 - `NODE_ENV`: production
-
+- `HOSTLOC_ACCOUNTS` :  `[{"username":"user1","password":"pass1"},{"username":"user2","password":"pass2"},{"username":"user3","password":"pass3"}]`
+// 多账户，优先读取使用
 ### 注意事项
 - Render会自动安装Chrome浏览器，无需额外配置
 - 应用已在无头模式下运行，适合云环境
